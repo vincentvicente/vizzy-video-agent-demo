@@ -132,8 +132,93 @@ def _download(url: str, dest: Path) -> Path:
     return dest
 
 
+def _resolve_image_url(call: SceneAPICall) -> str | None:
+    """First reference image as an http(s) URL or a base64 data URI (local files)."""
+    if not call.reference_image_uris:
+        return None
+    first = call.reference_image_uris[0]
+    if first.startswith(("http://", "https://")):
+        return first
+    return _to_data_uri(first)
+
+
+def _generate_one_volcano(call: SceneAPICall, run_id: str, on_progress=None) -> tuple[str, str]:
+    """Generate one scene clip via Volcengine Ark (Seedance 2.0).
+
+    Async API: POST a task → poll until succeeded → download the (24h-expiring) video URL.
+    """
+    api_key = video_model.ARK_API_KEY
+    if not api_key:
+        raise RuntimeError("ARK_API_KEY not set (required for VIDEO_PROVIDER=volcano)")
+    base = video_model.ARK_BASE_URL.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    content: list[dict] = [{"type": "text", "text": call.prompt}]
+    img = _resolve_image_url(call)
+    if img:
+        image_block: dict = {"type": "image_url", "image_url": {"url": img}}
+        if video_model.VOLCANO_IMAGE_ROLE:
+            image_block["role"] = video_model.VOLCANO_IMAGE_ROLE
+        content.append(image_block)
+
+    # Seedance 2.0 accepts a continuous 4-15s duration (our scenes are 3-10s → clamp to >=4).
+    duration = max(4, min(15, int(round(call.duration_s))))
+    body: dict = {
+        "model": video_model.VOLCANO_VIDEO_MODEL,
+        "content": content,
+        "ratio": call.aspect_ratio,            # "9:16"
+        "resolution": video_model.VOLCANO_RESOLUTION,
+        "duration": duration,
+        "generate_audio": False,               # we add VO via ElevenLabs
+        "watermark": False,
+    }
+    if call.seed is not None:
+        body["seed"] = call.seed
+
+    if on_progress:
+        on_progress(call.scene_id, "submitting")
+    resp = requests.post(f"{base}/contents/generations/tasks", headers=headers, json=body, timeout=60)
+    resp.raise_for_status()
+    task_id = resp.json().get("id")
+    if not task_id:
+        raise RuntimeError(f"Volcano create-task returned no id: {resp.text[:300]}")
+
+    if on_progress:
+        on_progress(call.scene_id, "running")
+
+    # Poll until terminal state (10 min budget, 5s interval).
+    poll_url = f"{base}/contents/generations/tasks/{task_id}"
+    deadline = time.time() + 600
+    video_url = None
+    while True:
+        if time.time() > deadline:
+            raise RuntimeError(f"Volcano task {task_id} timed out after 10 min")
+        time.sleep(5)
+        pr = requests.get(poll_url, headers=headers, timeout=30)
+        pr.raise_for_status()
+        data = pr.json()
+        status = data.get("status")
+        if status == "succeeded":
+            video_url = (data.get("content") or {}).get("video_url")
+            if not video_url:
+                raise RuntimeError(f"Volcano task {task_id} succeeded but no video_url: {data}")
+            break
+        if status in ("failed", "expired", "cancelled"):
+            raise RuntimeError(f"Volcano task {task_id} {status}: {data.get('error') or data}")
+        # queued / running → keep polling
+
+    dest = _CLIPS_ROOT / run_id / f"{call.scene_id}.mp4"
+    _download(video_url, dest)
+    if on_progress:
+        on_progress(call.scene_id, "done")
+    return call.scene_id, str(dest)
+
+
 def _generate_one(call: SceneAPICall, run_id: str, on_progress=None) -> tuple[str, str]:
-    """Generate one scene clip. Returns (scene_id, mp4_path)."""
+    """Generate one scene clip. Returns (scene_id, mp4_path). Dispatches by provider."""
+    if video_model.VIDEO_PROVIDER == "volcano":
+        return _generate_one_volcano(call, run_id, on_progress)
+
     if on_progress:
         on_progress(call.scene_id, "submitting")
 

@@ -1,50 +1,80 @@
 """
-Single source of truth for the video model.
+Single source of truth for the video model + provider.
 
-The previous problem: the schema hardcoded model to "seedance-2.0-pro" and the director
-also forced it to this name, but what actually ran was the model specified by
-FAL_VIDEO_MODEL (default Seedance v1 pro, often overridden to Hailuo in .env).
-Cost estimation used Hailuo's billing logic while labeling it Seedance — so the model
-name and billing recorded in the trace were both fake.
+Two providers are supported, selected by VIDEO_PROVIDER:
+  - "fal"     → fal.ai endpoints (Seedance v1 / Hailuo), submit-and-block API.
+  - "volcano" → Volcengine Ark (Seedance 2.0), async task + polling API.
 
-This module consolidates "actual model id / human-readable label / billing logic /
-cost estimation" in one place; clip_gen and director both pull from here, guaranteeing
-the trace records the model that actually ran.
+This module consolidates "which provider / which model id / human-readable label /
+billing logic / cost estimation" in one place; clip_gen and director both pull from
+here, so the trace always records the model that actually ran (no hardcoded fakes).
 """
 from __future__ import annotations
 
 import os
 
-# fal video model endpoint — it determines the model that actually runs. clip_gen submits with this.
+# ---------- Provider selection ----------
+# "fal" (default, keeps existing behavior) or "volcano".
+VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "fal").lower()
+
+# ---------- fal config ----------
+# fal video model endpoint — determines which model runs under the fal provider.
 FAL_VIDEO_MODEL = os.environ.get(
     "FAL_VIDEO_MODEL", "fal-ai/bytedance/seedance/v1/pro/image-to-video"
 )
 
+# ---------- Volcengine Ark (Seedance 2.0) config ----------
+# China region defaults; override ARK_BASE_URL + VOLCANO_VIDEO_MODEL for BytePlus international:
+#   ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3
+#   VOLCANO_VIDEO_MODEL=dreamina-seedance-2-0-260128
+ARK_BASE_URL = os.environ.get("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+ARK_API_KEY = os.environ.get("ARK_API_KEY")
+VOLCANO_VIDEO_MODEL = os.environ.get("VOLCANO_VIDEO_MODEL", "doubao-seedance-2-0-260128")
+# Ark output settings (Seedance 2.0)
+VOLCANO_RESOLUTION = os.environ.get("VOLCANO_RESOLUTION", "1080p")  # 480p/720p/1080p/2K
+# Role attached to reference images. "reference_image" = identity/style anchor (best for
+# cross-scene consistency). Set empty to omit (then the image is a literal first frame).
+VOLCANO_IMAGE_ROLE = os.environ.get("VOLCANO_IMAGE_ROLE", "reference_image")
+
+
+def active_model_id() -> str:
+    """The model id of the currently selected provider."""
+    if VIDEO_PROVIDER == "volcano":
+        return VOLCANO_VIDEO_MODEL
+    return FAL_VIDEO_MODEL
+
 
 def model_label(model_id: str | None = None) -> str:
-    """Translate a fal endpoint into a human-readable label, e.g. 'hailuo-02-fast' / 'seedance-v1-pro'.
+    """Translate a provider model id into a human-readable label, e.g. 'hailuo-02-fast',
+    'seedance-v1-pro', 'seedance-2.0', 'seedance-2.0-fast'.
 
-    This is the real model name written into the trace and shown to the user, no longer a hardcoded fake one.
+    This is the real model name written into the trace and shown to the user.
     """
-    ml = (model_id or FAL_VIDEO_MODEL).lower()
+    ml = (model_id or active_model_id()).lower()
     if "hailuo" in ml:
         tier = "fast" if "fast" in ml else "standard"
         return f"hailuo-02-{tier}"
     if "seedance" in ml:
-        ver = "v2" if ("/v2" in ml or "2.0" in ml) else "v1"
+        # Volcano ids look like doubao-seedance-2-0-260128 / ...-fast-...
+        if "seedance-2" in ml or "2.0" in ml or "/v2" in ml:
+            return "seedance-2.0-fast" if "fast" in ml else "seedance-2.0"
+        ver = "v1"
         tier = "fast" if "fast" in ml else ("pro" if "pro" in ml else "standard")
         return f"seedance-{ver}-{tier}"
-    return model_id or FAL_VIDEO_MODEL
+    return model_id or active_model_id()
 
 
 def billed_seconds(duration_s: float, model_id: str | None = None) -> int:
-    """Billed duration for a single clip (each model bills in fixed tiers, rounded up to the next tier).
+    """Billed duration for a single clip.
 
-    Hailuo 02: 6s minimum, otherwise 10s. Seedance: 5s or 10s.
+    Hailuo 02: 6s minimum, otherwise 10s. Seedance v1 (fal): 5s or 10s tier.
+    Seedance 2.0 (volcano): continuous 4-15s, billed by the requested (clamped) duration.
     """
-    ml = (model_id or FAL_VIDEO_MODEL).lower()
+    ml = (model_id or active_model_id()).lower()
     if "hailuo" in ml:
         return 6 if duration_s <= 6 else 10
+    if "seedance-2" in ml or "2.0" in ml:
+        return max(4, min(15, int(round(duration_s))))
     if "seedance" in ml:
         return 5 if duration_s <= 5 else 10
     # Unknown model: bill by actual seconds (conservative)
@@ -52,18 +82,22 @@ def billed_seconds(duration_s: float, model_id: str | None = None) -> int:
 
 
 def cost_per_second(model_id: str | None = None) -> float:
-    """Cost per second (USD). An explicit FAL_COST_PER_SECOND override takes priority, otherwise the model's default price.
+    """Cost per second (USD). An explicit VIDEO_COST_PER_SECOND (or legacy FAL_COST_PER_SECOND)
+    override takes priority; otherwise the model's default price.
 
-    Default prices (vary with fal's pricing, only a rough estimate before the γ checkpoint):
+    Defaults are rough pre-checkpoint estimates and vary with provider pricing:
       Hailuo 02 Standard 768p ≈ $0.045/s
-      Seedance Fast ≈ $0.24/s, Seedance Pro ≈ $0.30/s
+      Seedance v1 Fast ≈ $0.24/s, Seedance v1 Pro ≈ $0.30/s
+      Seedance 2.0 ≈ $0.30/s (override VIDEO_COST_PER_SECOND with your real Ark price)
     """
-    env = os.environ.get("FAL_COST_PER_SECOND")
+    env = os.environ.get("VIDEO_COST_PER_SECOND") or os.environ.get("FAL_COST_PER_SECOND")
     if env:
         return float(env)
-    ml = (model_id or FAL_VIDEO_MODEL).lower()
+    ml = (model_id or active_model_id()).lower()
     if "hailuo" in ml:
         return 0.045
+    if "seedance-2" in ml or "2.0" in ml:
+        return 0.30
     if "seedance" in ml:
         return 0.24 if "fast" in ml else 0.30
     return 0.05
