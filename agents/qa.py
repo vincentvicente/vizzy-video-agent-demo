@@ -1,9 +1,10 @@
 """
-QA Agent — Claude vision 抽帧 + 检查.
+QA Agent — Claude vision frame sampling + checks.
 
-抽 N 帧从 final video, 喂给 Claude vision + brand/storyboard 上下文, 拿到 structured QAReport.
+Samples N frames from the final video, feeds them to Claude vision along with
+brand/storyboard context, and returns a structured QAReport.
 
-检查维度 (per PRD output #5):
+Check dimensions (per PRD output #5):
   - spelling (frame OCR via vision)
   - brand_consistency (color + tone)
   - claim_compliance

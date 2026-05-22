@@ -1,12 +1,14 @@
 """
 Clip Generation runner.
 
-并行调 fal.ai Seedance 2.0 Pro image-to-video, 把每个 scene 的 SceneAPICall 转成实际的 mp4 文件.
+Calls fal.ai Seedance 2.0 Pro image-to-video in parallel, turning each scene's
+SceneAPICall into an actual mp4 file.
 
-设计要点:
-- 用 ThreadPoolExecutor 并行 (Streamlit 是 sync 环境, 不引 asyncio)
-- 单 clip 失败 → 整个 stage 失败, 抛到 retry router 处理
-- 每个 clip 下载到 data/clips/<run_id>/<scene_id>.mp4
+Design notes:
+- Uses ThreadPoolExecutor for parallelism (Streamlit is a sync environment, so we avoid asyncio)
+- A single clip failure does NOT fail the whole stage outright — the successful clips are
+  preserved and a ClipGenError is raised for the retry router to handle
+- Each clip is downloaded to data/clips/<run_id>/<scene_id>.mp4
 """
 from __future__ import annotations
 
@@ -24,15 +26,17 @@ from schemas import DirectorOutput, SceneAPICall
 from utils import video_model
 
 
-# 单一事实源: 实际运行的 fal 模型 (见 utils/video_model.py)
+# Single source of truth: the fal model actually used at runtime (see utils/video_model.py)
 _FAL_MODEL = video_model.FAL_VIDEO_MODEL
 _CLIPS_ROOT = Path(__file__).parent.parent / "data" / "clips"
 
 
 class ClipGenError(RuntimeError):
-    """部分 clip 生成失败时抛出. 关键: 把已成功的 clip 一并带出来, 让 caller 保留它们,
+    """Raised when some clips fail to generate. The key idea: carry the already-successful
+    clips out with the error so the caller can keep them.
 
-    用户只需单独重生失败的 scene, 不必把整批 (每个 ~$1) 重跑一遍. 这是省钱的核心.
+    The user only needs to regenerate the failed scenes, instead of rerunning the whole
+    batch (~$1 each). This is the core of saving cost.
     """
     def __init__(self, results: dict[str, str], errors: list[tuple[str, Exception]]):
         self.results = results
@@ -47,9 +51,10 @@ class ClipGenError(RuntimeError):
 def _to_data_uri(path: str) -> str:
     """Encode a local file as a base64 data URI.
 
-    我们用 data URI 而不是 fal_client.upload_file() — 因为 upload_file 走 fal storage
-    需要 storage_write 权限, 而很多 fal key (尤其 free tier) 没开. data URI 直接塞进
-    请求 body, 不经过 fal storage, 任何 key 都能用.
+    We use a data URI instead of fal_client.upload_file() — upload_file goes through fal
+    storage and needs the storage_write permission, which many fal keys (especially free
+    tier) don't have. A data URI is embedded directly in the request body, bypasses fal
+    storage, and works with any key.
     """
     mime, _ = mimetypes.guess_type(path)
     mime = mime or "image/png"
@@ -60,7 +65,7 @@ def _to_data_uri(path: str) -> str:
 
 def _build_args(call: SceneAPICall) -> dict:
     """Build the input dict — schema differs by model family."""
-    # 拿 first reference image, encode 成 data URI 避免 fal storage 权限问题
+    # Take the first reference image and encode it as a data URI to avoid fal storage permission issues
     image_url = None
     if call.reference_image_uris:
         first = call.reference_image_uris[0]
@@ -73,17 +78,17 @@ def _build_args(call: SceneAPICall) -> dict:
 
     # ---------- MiniMax Hailuo 02 ----------
     if "hailuo" in model_lower:
-        # Hailuo 02 standard 只接受 duration=6 或 10
+        # Hailuo 02 standard only accepts duration=6 or 10
         duration = 6 if call.duration_s <= 6 else 10
         args: dict = {
             "prompt": call.prompt,
             "duration": duration,
             "resolution": "768P",
-            "prompt_optimizer": True,  # MiniMax 自带 prompt 优化器, 让它帮忙润色
+            "prompt_optimizer": True,  # MiniMax has a built-in prompt optimizer; let it polish the prompt
         }
         if image_url:
             args["image_url"] = image_url
-        # Hailuo 不支持 aspect_ratio (沿用 reference image 的比例) — 不传
+        # Hailuo doesn't support aspect_ratio (it follows the reference image's ratio) — omit it
         return args
 
     # ---------- Bytedance Seedance (v1/v2, pro/fast) ----------
@@ -92,10 +97,10 @@ def _build_args(call: SceneAPICall) -> dict:
             "prompt": call.prompt,
             "aspect_ratio": call.aspect_ratio,
             "resolution": "1080p",
-            # 关掉 Seedance 2.0 自带音频 — 我们用 ElevenLabs, 同时避免 audio content policy 误报
+            # Turn off Seedance 2.0's built-in audio — we use ElevenLabs, and this also avoids audio content policy false positives
             "generate_audio": False,
         }
-        # Seedance duration 是 string "5" / "10" (v1) 或 int (v2). 用 string 兼容性最好.
+        # Seedance duration is a string "5" / "10" (v1) or an int (v2). A string has the best compatibility.
         args["duration"] = "5" if call.duration_s <= 5 else "10"
         if image_url:
             args["image_url"] = image_url
@@ -103,7 +108,7 @@ def _build_args(call: SceneAPICall) -> dict:
             args["seed"] = call.seed
         return args
 
-    # ---------- Fallback (其他模型) ----------
+    # ---------- Fallback (other models) ----------
     args = {"prompt": call.prompt}
     if image_url:
         args["image_url"] = image_url
@@ -112,7 +117,7 @@ def _build_args(call: SceneAPICall) -> dict:
     return args
 
 
-# 保留旧名字做向后兼容
+# Keep the old name for backward compatibility
 _seedance_args = _build_args
 
 

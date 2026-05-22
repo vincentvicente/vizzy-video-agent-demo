@@ -1,11 +1,11 @@
 """
 Centralized LLM prompt templates.
 
-每个 prompt 都强调:
-1. JSON-only 输出 (下游 strict parse)
-2. paid-social vertical 9:16 上下文
-3. 模型不要生成 text/logo/captions (这些在 Editor 层加 overlay)
-4. Schema B 约束 (role enum + 时长上限)
+Every prompt emphasizes:
+1. JSON-only output (downstream strict parse)
+2. paid-social vertical 9:16 context
+3. the model must not generate text/logo/captions (those are added as overlays in the Editor layer)
+4. Schema B constraints (role enum + duration caps)
 """
 
 STRATEGIST_BRAND_SYSTEM = """You are the Strategist Agent of Vizzy, a data-driven paid-social video ad generator.
@@ -76,9 +76,10 @@ The narrative_rationale is critical — it explains WHY you chose this structure
 
 
 def _format_constraints(extra_constraints: dict | None) -> str:
-    """Render retry_router 的 extra_constraints 成一段醒目的 RETRY DIRECTIVES, 注入 user prompt.
+    """Render the retry_router's extra_constraints into a prominent block of RETRY DIRECTIVES injected into the user prompt.
 
-    空约束 → 空串 (首次运行不受影响). 有约束 → 上一次 QA 失败的强化指令, 模型必须照做.
+    No constraints -> empty string (the first run is unaffected). With constraints -> the
+    strengthened instructions from the last failed QA, which the model must follow.
     """
     if not extra_constraints:
         return ""

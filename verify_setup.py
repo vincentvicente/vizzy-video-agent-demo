@@ -1,9 +1,9 @@
 """
-快速验证: API keys + Strategist 工作.
+Quick smoke test: API keys + Strategist working.
 
-跑这个之前先 `pip install -r requirements.txt` + 填好 .env.
+Before running this, do `pip install -r requirements.txt` and fill in .env.
 
-成本: 仅 1 个 Claude 调用 (~$0.01), 不调 fal.ai / ElevenLabs.
+Cost: just 1 Claude call (~$0.01); does not hit fal.ai / ElevenLabs.
 """
 import os
 import sys
@@ -43,8 +43,8 @@ def check_fal():
 
 
 def check_elevenlabs():
-    # 不用 voices.get_all (需要 voices_read 权限), 直接做一个最小 TTS 调用
-    # 验证我们真正需要的 text_to_speech 能力.
+    # Don't use voices.get_all (needs the voices_read permission); just make a minimal TTS call
+    # to verify the text_to_speech capability we actually need.
     from elevenlabs.client import ElevenLabs
     voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
     client = ElevenLabs(api_key=os.environ["ELEVENLABS_API_KEY"])

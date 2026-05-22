@@ -221,17 +221,17 @@ with st.sidebar:
                     st.session_state.confirm_delete = run_id
                     st.rerun()
 
-            # 二次确认: 只有当前待删 run 才展开确认条
+            # Confirmation: only expand the confirm bar for the run pending deletion
             if st.session_state.confirm_delete == run_id:
-                st.warning(f"删除 `{label_id}`？将永久移除 trace/clips/refs/voiceover/final，不可恢复。")
+                st.warning(f"Delete `{label_id}`? This permanently removes trace/clips/refs/voiceover/final and cannot be undone.")
                 cc1, cc2 = st.columns(2)
                 with cc1:
-                    if st.button("✅ 确认删除", key=f"cfdel_{run_id}",
+                    if st.button("✅ Confirm delete", key=f"cfdel_{run_id}",
                                  type="primary", use_container_width=True):
                         try:
                             removed = delete_run(run_id)
                             log(f"Deleted run {run_id} ({len(removed)} path(s))")
-                            # 若删的是当前 active run, 一并清空
+                            # If we deleted the current active run, clear it too
                             if state and state.run_id == run_id:
                                 st.session_state.state = None
                                 st.session_state.last_decision = None
@@ -240,9 +240,9 @@ with st.sidebar:
                             refresh_runs()
                             st.rerun()
                         except Exception as e:
-                            st.error(f"删除失败: {e}")
+                            st.error(f"Delete failed: {e}")
                 with cc2:
-                    if st.button("取消", key=f"cancel_{run_id}",
+                    if st.button("Cancel", key=f"cancel_{run_id}",
                                  use_container_width=True):
                         st.session_state.confirm_delete = None
                         st.rerun()
@@ -586,7 +586,7 @@ elif view == "director":
                         try:
                             new_paths = run_clip_gen(sub_output, run_id=state.run_id, on_progress=None)
                         except ClipGenError as ce:
-                            # 保留已成功的, 失败的留给用户单独重生 (省钱: 不重跑成功的)
+                            # Keep the successful ones; let the user regenerate failures individually (saves money: don't rerun successes)
                             state.clip_paths.update(ce.results)
                             state.final_video_path = None
                             log(f"{len(ce.results)} clip(s) ok, {len(ce.errors)} failed")
@@ -712,7 +712,7 @@ elif view == "final":
 # === QA ===
 elif view == "qa":
     _section_header("✅ QA Report",
-                    "Claude vision抽帧 + 拼写 + brand 一致性 + claim compliance 检查")
+                    "Claude vision frame sampling + spelling + brand consistency + claim compliance checks")
 
     qa = state.qa_report
     decision = st.session_state.last_decision or {}

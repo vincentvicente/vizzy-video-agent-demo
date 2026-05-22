@@ -3,8 +3,9 @@ Director Agent.
 
 Storyboard → DirectorOutput (per-scene Seedance 2.0 API call params).
 
-Prototype 简化: 单一模型 (Seedance 2.0 Pro) for all scenes. 三层模型选择层退化,
-LLM 只负责把 storyboard 的 visual_description 翻译成 cinematic video gen prompt.
+Prototype simplification: a single model (Seedance 2.0 Pro) for all scenes. The
+three-tier model-selection layer collapses; the LLM only translates the
+storyboard's visual_description into a cinematic video-gen prompt.
 """
 from __future__ import annotations
 
@@ -42,7 +43,8 @@ def run_director(
 
     Reference URIs are attached to every scene call (Seedance Omni Reference will
     apply them as visual style/identity anchors).
-    extra_constraints: retry_router 注入的强化指令 (e.g. anti-text/palette), 首次运行为 None.
+    extra_constraints: reinforcement instructions injected by retry_router
+    (e.g. anti-text/palette); None on the first run.
     """
     client = Anthropic()
     resp = client.messages.create(
@@ -78,7 +80,7 @@ def run_director(
 
     # Force-inject reference URIs and durations from storyboard (don't trust LLM here —
     # these are deterministic data we already have)
-    actual_model = video_model.model_label()  # 真实运行的模型, 不是写死的假名
+    actual_model = video_model.model_label()  # the model actually running, not a hard-coded placeholder name
     sb_by_id = {s.id: s for s in storyboard.scenes}
     for call in parsed["api_calls"]:
         sid = call["scene_id"]
@@ -93,7 +95,7 @@ def run_director(
             "text, logo, captions, subtitles, watermark, UI, words, letters",
         )
 
-    # Recompute cost ourselves (don't trust LLM math) — 用实际模型的计费逻辑.
+    # Recompute cost ourselves (don't trust LLM math) — use the actual model's pricing logic.
     estimated = video_model.estimate_cost([c["duration_s"] for c in parsed["api_calls"]])
 
     return DirectorOutput(api_calls=[SceneAPICall(**c) for c in parsed["api_calls"]],

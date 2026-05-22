@@ -1,7 +1,7 @@
 """
 Fetch + extract content from a brand URL.
 
-策略: GET + BeautifulSoup, 抽 title / meta description / h1 / main content / product images.
+Strategy: GET + BeautifulSoup, then pull out title / meta description / h1 / main content / product images.
 """
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ def fetch_page_content(url: str, timeout: int = 15) -> dict:
     """
     Fetch a brand/product page and extract content useful for Strategist.
 
-    Uses a realistic browser fingerprint to get past basic anti-bot (Cloudflare 等).
-    对于更严格的 anti-bot (Akamai, Datadome 等) 仍可能失败 — 那种情况要 headless browser.
+    Uses a realistic browser fingerprint to get past basic anti-bot (Cloudflare, etc.).
+    Stricter anti-bot (Akamai, Datadome, etc.) may still block us — those cases need a headless browser.
 
     Returns:
         {
@@ -61,7 +61,7 @@ def fetch_page_content(url: str, timeout: int = 15) -> dict:
         resp = session.get(url, timeout=timeout, allow_redirects=True)
         resp.raise_for_status()
     except requests.HTTPError as e:
-        # 给一个比 "403 Forbidden" 更有指导性的错误信息
+        # Give a more actionable error message than a bare "403 Forbidden"
         if e.response is not None and e.response.status_code in (403, 401, 429):
             raise RuntimeError(
                 f"{url} blocked our request ({e.response.status_code}). "

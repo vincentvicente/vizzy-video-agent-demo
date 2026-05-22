@@ -1,10 +1,12 @@
 """
 Pipeline Orchestrator.
 
-跑通整个 Vizzy pipeline, 在每个 stage 持久化 trace, 接入条件图 retry router.
+Runs the entire Vizzy pipeline end to end, persisting a trace at each stage and wiring
+in the conditional-graph retry router.
 
-不是一个长 function — 拆成各 stage 的独立 entry point, 因为 Streamlit 是 stateful UI,
-每个用户操作触发一次 stage 调用, 而不是一口气跑到底.
+This is not one long function — it's split into a separate entry point per stage, because
+Streamlit is a stateful UI: each user action triggers one stage call, rather than running
+straight through in a single pass.
 """
 from __future__ import annotations
 
@@ -34,7 +36,8 @@ from utils.trace import save_trace, append_trace_event, new_run_id
 def new_pipeline(brand_url: str = "", brand_text: Optional[str] = None) -> PipelineState:
     """Initialize a fresh run.
 
-    传 brand_url → URL 模式 (抓网页); 传 brand_text → text 模式 (用户直接粘文案).
+    Pass brand_url → URL mode (scrape the web page); pass brand_text → text mode (the user
+    pastes the copy directly).
     """
     return PipelineState(run_id=new_run_id(), brand_url=brand_url, brand_text=brand_text)
 
@@ -42,10 +45,11 @@ def new_pipeline(brand_url: str = "", brand_text: Optional[str] = None) -> Pipel
 def stage_strategist(state: PipelineState, reference_count: int = 0) -> PipelineState:
     """Run Strategist (brand understanding + storyboard).
 
-    输入源二选一: state.brand_text 有值走 text 模式, 否则抓 state.brand_url.
+    One of two input sources: if state.brand_text is set, use text mode; otherwise scrape
+    state.brand_url.
     """
     append_trace_event(state.model_dump(), "strategist", "start")
-    # 消费 retry 约束 (若本次是 retry from strategist). pop → 跑完即清, 不污染后续运行.
+    # Consume the retry constraints (if this run is a retry from strategist). pop → cleared once used, so it doesn't pollute later runs.
     constraints = state.active_constraints.pop("strategist", None)
     if state.brand_text:
         brand, page = extract_brand_from_text(
@@ -62,7 +66,7 @@ def stage_strategist(state: PipelineState, reference_count: int = 0) -> Pipeline
         "brand": brand.model_dump(),
         "storyboard": storyboard.model_dump(),
         "page_snapshot": page,
-        "brand_text": state.brand_text,  # 持久化原始文本, 供 retry / 重载复用
+        "brand_text": state.brand_text,  # Persist the original text for reuse on retry / reload
         "applied_constraints": constraints or {},
     })
     return state
@@ -71,7 +75,7 @@ def stage_strategist(state: PipelineState, reference_count: int = 0) -> Pipeline
 def stage_director(state: PipelineState) -> PipelineState:
     """Run Director (storyboard → Seedance API calls)."""
     assert state.brand and state.storyboard, "Strategist must complete first"
-    # 消费 retry 约束 (若本次是 retry from director). pop → 跑完即清.
+    # Consume the retry constraints (if this run is a retry from director). pop → cleared once used.
     constraints = state.active_constraints.pop("director", None)
     director_output = run_director(
         brand=state.brand,
@@ -92,8 +96,9 @@ def stage_clip_gen(
 ) -> PipelineState:
     """Run Clip Gen (parallel fal.ai calls).
 
-    部分失败时保留已成功的 clip (merge 进 state), 再把 ClipGenError 抛给 caller —
-    用户只需重生失败的 scene, 不必整批重跑.
+    On partial failure, keep the successful clips (merged into state), then raise the
+    ClipGenError to the caller — the user only needs to regenerate the failed scenes,
+    not rerun the whole batch.
     """
     assert state.director_output, "Director must complete first"
     try:
@@ -144,7 +149,7 @@ def stage_qa(state: PipelineState) -> tuple[PipelineState, retry_router.RetryDec
 
     if decision.action == "retry":
         retry_router.consume_budget(state, decision.retry_from_stage)
-        # 把强化约束挂到目标 stage 上, 等它重跑时注入 prompt — 这是 retry 闭环的关键一步.
+        # Attach the reinforced constraints to the target stage so they get injected into the prompt on its rerun — the key step that closes the retry loop.
         if decision.extra_constraints:
             state.active_constraints[decision.retry_from_stage] = decision.extra_constraints
 

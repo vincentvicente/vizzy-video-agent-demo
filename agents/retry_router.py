@@ -1,11 +1,14 @@
 """
-Retry Router — 条件图模式 (你定的模式 3).
+Retry Router — conditional routing table mode (mode 3).
 
-QA 输出的每个 Fault 都查这张表, 决定要回到哪个 stage 重做.
-路由表是**写死的**, 不让 LLM 在线决定 — 这就是 legibility-first 的物化:
-失败发生时, 你看一眼表就知道系统下一步会去哪里, 完全可预测.
+Every Fault emitted by QA is looked up in this table to decide which stage to
+re-run. The routing table is **hard-coded** — the LLM never decides routing at
+runtime. This is legibility-first made concrete: when a failure happens, a
+glance at the table tells you exactly where the system goes next, fully
+predictable.
 
-Retry budget 也是写死的, 超过 → 整体 halt, 报给用户 (而不是无限循环).
+The retry budget is also hard-coded: once exhausted → the whole run halts and
+reports to the user (instead of looping forever).
 """
 from __future__ import annotations
 
@@ -13,23 +16,26 @@ from typing import Literal, Optional
 from schemas import QAReport, Fault, PipelineState
 
 
-# 条件图: fault_type → stage to retry from
-# 注意 "spelling" 有两种情况:
-#   1. 模型在画面像素里生成了带错字的文本 (Hailuo/Seedance 无视 negative prompt) → 必须回 Director 改 prompt
-#   2. SRT 字幕拼写错 → Editor 重生
-# 默认走 Director (case 1 更常见, 因为 SRT 是 ElevenLabs VO 转的, 不会拼错). Editor 重跑代价小,
-# Director 重跑代价大但能真正修问题. 选 Director 是有 retry budget 兜底的保守做法.
+# Conditional routing table: fault_type → stage to retry from.
+# Note that "spelling" covers two cases:
+#   1. The model rendered misspelled text into the frame pixels (Hailuo/Seedance
+#      ignored the negative prompt) → must go back to Director to fix the prompt.
+#   2. The SRT subtitle is misspelled → regenerate via Editor.
+# Default to Director (case 1 is more common, since the SRT comes from ElevenLabs
+# VO transcription and won't misspell). An Editor re-run is cheap; a Director
+# re-run is costly but actually fixes the problem. Choosing Director is the
+# conservative call, backed by the retry budget as a safety net.
 ROUTING_TABLE: dict[str, str] = {
-    "spelling": "director",                     # 模型画面带错字 → Director 重写 prompt 强化 anti-text
-    "brand_consistency:color": "director",      # palette 不对 → Director 重写 prompt 加 palette 约束
-    "brand_consistency:tone": "strategist",     # 整体调性不对 → Strategist 重做 brand understanding
-    "claim_compliance": "strategist",           # 违规 claim → Strategist 改 USP / 重写 VO
-    "ranking_low": "halt",                      # 整体差但无具体原因 → halt + 报用户
-    "ok": "none",                               # 不需要 retry
+    "spelling": "director",                     # rendered text in frame → Director rewrites prompt to strengthen anti-text
+    "brand_consistency:color": "director",      # wrong palette → Director rewrites prompt with palette constraints
+    "brand_consistency:tone": "strategist",     # wrong overall tone → Strategist re-derives brand understanding
+    "claim_compliance": "strategist",           # non-compliant claim → Strategist fixes USP / rewrites VO
+    "ranking_low": "halt",                      # poor overall but no specific cause → halt + report to user
+    "ok": "none",                               # no retry needed
 }
 
 
-# 每个 stage 的 retry budget. Strict — 超了 halt, 永不无限循环.
+# Per-stage retry budget. Strict — once exceeded, halt; never loop forever.
 DEFAULT_RETRY_BUDGET: dict[str, int] = {
     "strategist": 1,
     "director": 2,

@@ -1,8 +1,9 @@
 """
 Strict JSON schemas for every stage I/O.
 
-设计原则: 每个 stage 都强制结构化输出，下游消费者可以可靠 parse。失败时整个 trace 都是
-可读 JSON，方便下钻定位错误。
+Design principle: every stage is forced to emit structured output so downstream
+consumers can parse it reliably. On failure, the entire trace is readable JSON,
+making it easy to drill down and locate the error.
 """
 from __future__ import annotations
 
@@ -11,21 +12,21 @@ from pydantic import BaseModel, Field
 
 # Scene role enum (Schema B: LLM picks from this enum, decides sequence + duration)
 SCENE_ROLES = Literal[
-    "hook",            # 前 3 秒抓眼球
-    "problem",         # 痛点
-    "product_reveal",  # 产品出现
-    "science",         # 为什么有效 / 机制
-    "social_proof",    # 评论 / 评分 / 销量
-    "comparison",      # vs 竞品
-    "demo",            # 怎么用
-    "cta",             # 行动召唤
+    "hook",            # grab attention in the first 3 seconds
+    "problem",         # pain point
+    "product_reveal",  # product appears
+    "science",         # why it works / mechanism
+    "social_proof",    # reviews / ratings / sales
+    "comparison",      # vs competitors
+    "demo",            # how to use it
+    "cta",             # call to action
 ]
 
 
 class BrandUnderstanding(BaseModel):
-    """Strategist 第一阶段输出 — 对品牌的认知。"""
+    """Strategist stage-one output — its understanding of the brand."""
     name: str = Field(description="brand name")
-    usp: str = Field(description="unique selling proposition, 一句话")
+    usp: str = Field(description="unique selling proposition, one sentence")
     target_audience: str = Field(description="who this is for")
     tone: list[str] = Field(description="brand tone tags, e.g. ['clinical','minimal']")
     palette: list[str] = Field(description="hex color palette, 2-5 colors")
@@ -39,7 +40,7 @@ class BrandUnderstanding(BaseModel):
 
 
 class Scene(BaseModel):
-    """单个 scene 的描述。"""
+    """Description of a single scene."""
     id: str = Field(description="s1, s2, ...")
     role: SCENE_ROLES  # type: ignore
     duration_s: int = Field(ge=3, le=10, description="3-10 seconds per scene")
@@ -49,7 +50,7 @@ class Scene(BaseModel):
 
 
 class Storyboard(BaseModel):
-    """Strategist 第二阶段输出 — 完整分镜。"""
+    """Strategist stage-two output — the complete storyboard."""
     total_duration_s: int = Field(ge=20, le=70, description="20-70s total")
     scenes: list[Scene] = Field(min_length=4, max_length=7)
     narrative_rationale: str = Field(
@@ -58,9 +59,10 @@ class Storyboard(BaseModel):
 
 
 class SceneAPICall(BaseModel):
-    """Director 输出的单 scene API 调用参数."""
+    """API call parameters for a single scene, produced by the Director."""
     scene_id: str
-    # 实际运行的视频模型标签 (来自 utils.video_model.model_label), 不再写死 — trace 要记真实模型.
+    # Label of the video model actually running (from utils.video_model.model_label),
+    # no longer hardcoded — the trace must record the real model.
     model: str = "seedance-v1-pro"
     duration_s: int
     aspect_ratio: Literal["9:16"] = "9:16"
@@ -74,13 +76,13 @@ class SceneAPICall(BaseModel):
 
 
 class DirectorOutput(BaseModel):
-    """Director 全部输出 — 每个 scene 一个 API call spec."""
+    """Full Director output — one API call spec per scene."""
     api_calls: list[SceneAPICall]
     estimated_cost_usd: float = Field(description="rough cost estimate before clip gen")
 
 
 class Fault(BaseModel):
-    """QA 发现的单个问题 — 喂给 retry_router。"""
+    """A single issue found by QA — fed to retry_router."""
     fault_type: Literal[
         "spelling",
         "brand_consistency:color",
@@ -95,7 +97,7 @@ class Fault(BaseModel):
 
 
 class QAReport(BaseModel):
-    """QA 完整输出。"""
+    """Full QA output."""
     spelling: dict = Field(description="{ok: bool, errors: [str]}")
     brand_consistency: dict = Field(description="{ok: bool, color_match: float, issues: [Fault]}")
     claim_compliance: dict = Field(description="{ok: bool, violations: [str]}")
@@ -105,11 +107,13 @@ class QAReport(BaseModel):
 
 
 class PipelineState(BaseModel):
-    """每个 stage 跑完都把当前完整 state 持久化, 供 trace + retry 用。"""
+    """After each stage finishes, persist the full current state for trace + retry."""
     run_id: str
     brand_url: str
-    # text 输入模式: 用户直接粘品牌/产品文案, 不抓 URL. 二者择一作为 Strategist 的输入源.
-    # 持久化它让 "retry from strategist" 和历史重载都能复用原始文本, 不会回退去 fetch 一个假 URL.
+    # Text input mode: the user pastes brand/product copy directly instead of fetching a URL.
+    # One of the two serves as the Strategist's input source.
+    # Persisting it lets "retry from strategist" and history reloads reuse the original text,
+    # rather than falling back to fetching a bogus URL.
     brand_text: Optional[str] = None
     brand: Optional[BrandUnderstanding] = None
     storyboard: Optional[Storyboard] = None
@@ -124,10 +128,12 @@ class PipelineState(BaseModel):
             "director": 2,
             "clip_gen": 2,
             "editor": 1,
-            "qa": 0,  # QA 不重试自己
+            "qa": 0,  # QA does not retry itself
         }
     )
-    # stage → retry 约束 (retry_router 算出的 extra_constraints). 该 stage 重跑时读取并注入 prompt,
-    # 跑完即清空. 这是 retry 闭环的载体: 让 "QA fault → 强化 prompt 重跑" 真正生效, 而不是用原 prompt 复跑.
+    # stage → retry constraints (extra_constraints computed by retry_router). When that stage
+    # reruns, they are read and injected into the prompt, then cleared once the run completes.
+    # This is the carrier of the retry loop: it makes "QA fault → rerun with a strengthened prompt"
+    # actually take effect, rather than rerunning with the original prompt.
     active_constraints: dict[str, dict] = Field(default_factory=dict)
     trace: list[dict] = Field(default_factory=list)

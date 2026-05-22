@@ -1,8 +1,9 @@
 """
 Enumerate past pipeline runs from data/traces/ and rehydrate them into PipelineState.
 
-历史 run 持久化: 每个 stage 跑完都把它的输出 dump 成 JSON 到 data/traces/<run_id>/<stage>.json.
-这里我们反向重建 PipelineState, 让用户能在 sidebar 点开任何一个旧 run 继续编辑 / 重生.
+Run persistence: each stage dumps its output as JSON to data/traces/<run_id>/<stage>.json
+once it finishes. Here we reconstruct the PipelineState in reverse so the user can open any
+old run from the sidebar to keep editing / regenerating it.
 """
 from __future__ import annotations
 
@@ -24,7 +25,8 @@ DATA_ROOT = Path(__file__).parent.parent / "data"
 TRACE_ROOT = DATA_ROOT / "traces"
 FINAL_ROOT = DATA_ROOT / "final"
 
-# run_id 形如 20260521_163355_p2ul. 删除前严格校验, 防止 path traversal 删到别的目录.
+# run_id looks like 20260521_163355_p2ul. Validate strictly before deleting to prevent
+# path traversal from wiping out other directories.
 _RUN_ID_RE = re.compile(r"^\d{8}_\d{6}_[a-z0-9]{4}$")
 
 
@@ -65,12 +67,13 @@ def list_runs() -> list[dict]:
 
 
 def delete_run(run_id: str) -> list[str]:
-    """彻底删除一个 run 的全部文件 (不可逆).
+    """Permanently delete every file belonging to a run (irreversible).
 
-    级联清理: traces / clips / refs / voiceover 目录 + final/<run_id>.mp4.
-    返回实际删掉的路径列表 (供 UI 展示 / 日志).
+    Cascade cleanup: the traces / clips / refs / voiceover directories + final/<run_id>.mp4.
+    Returns the list of paths actually deleted (for UI display / logging).
 
-    Raises ValueError if run_id 格式非法 — 严防把 data/ 下其他东西误删.
+    Raises ValueError if run_id is malformed — guards against accidentally deleting
+    other things under data/.
     """
     if not _RUN_ID_RE.match(run_id):
         raise ValueError(f"Refusing to delete: '{run_id}' is not a valid run_id")
@@ -78,7 +81,7 @@ def delete_run(run_id: str) -> list[str]:
     deleted: list[str] = []
     for sub in ("traces", "clips", "refs", "voiceover"):
         d = DATA_ROOT / sub / run_id
-        # resolve + 确认仍在 DATA_ROOT 之内 (双保险)
+        # resolve + confirm it is still inside DATA_ROOT (belt and suspenders)
         if d.exists() and DATA_ROOT.resolve() in d.resolve().parents:
             shutil.rmtree(d, ignore_errors=True)
             deleted.append(str(d))
@@ -113,7 +116,7 @@ def load_state(run_id: str) -> Optional[PipelineState]:
             page = data.get("page_snapshot", {})
             if isinstance(page, dict) and page.get("url"):
                 state.brand_url = page["url"]
-            # text 模式: 恢复原始文案, 让重载后的 run 仍能正确 retry from strategist
+            # text mode: restore the original copy so a reloaded run can still retry from strategist correctly
             if data.get("brand_text"):
                 state.brand_text = data["brand_text"]
         except Exception as e:

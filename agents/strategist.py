@@ -4,7 +4,8 @@ Strategist Agent.
 Stage 1: URL → BrandUnderstanding
 Stage 2: BrandUnderstanding → Storyboard
 
-每个 stage 都 strict JSON 输出 + Pydantic 校验. 失败时抛 ValidationError, retry router 接管.
+Each stage produces strict JSON output validated with Pydantic. On failure it
+raises a ValidationError and the retry router takes over.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ _MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 
 def _strip_json_fences(text: str) -> str:
-    """Claude 偶尔在 JSON 外包 ```json ... ```, 剥掉."""
+    """Claude occasionally wraps JSON in ```json ... ``` fences — strip them."""
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(json)?\s*", "", text)
@@ -63,7 +64,8 @@ def extract_brand_understanding(
     Stage 1: fetch URL, extract structured brand understanding.
 
     Returns (validated BrandUnderstanding, raw page content dict for trace).
-    extra_constraints: retry_router 注入的强化指令 (e.g. tone/compliance), 首次运行为 None.
+    extra_constraints: reinforcement instructions injected by retry_router
+    (e.g. tone/compliance); None on the first run.
     """
     page = fetch_page_content(url)
     raw_json = _claude_json(
@@ -81,9 +83,11 @@ def extract_brand_from_text(
     """
     Stage 1 fallback: skip URL fetching, take raw text from user.
 
-    适用场景: 网站有 Akamai/Datadome 级 anti-bot 我们抓不动 → 用户在自己浏览器里
-    复制全文粘进来. Strategist 工作流不变 (Claude 看文本抽 brand info), 只是输入源从
-    requests.get 变成 user paste.
+    Use case: the site has Akamai/Datadome-grade anti-bot protection we can't
+    fetch through → the user copies the full text from their own browser and
+    pastes it in. The Strategist workflow is unchanged (Claude reads the text and
+    extracts brand info); only the input source shifts from requests.get to a
+    user paste.
     """
     page = {
         "url": source_hint,
@@ -110,7 +114,8 @@ def write_storyboard(
     Stage 2: brand → storyboard (Schema B: LLM picks role sequence + duration).
 
     reference_count tells the model how many user-uploaded refs are available.
-    extra_constraints: retry_router 注入的强化指令 (e.g. compliance VO rewrite), 首次运行为 None.
+    extra_constraints: reinforcement instructions injected by retry_router
+    (e.g. compliance VO rewrite); None on the first run.
     """
     raw_json = _claude_json(
         system=STRATEGIST_STORYBOARD_SYSTEM,

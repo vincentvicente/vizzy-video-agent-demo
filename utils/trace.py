@@ -1,8 +1,9 @@
 """
 Pipeline trace persistence.
 
-每个 stage 跑完, 把完整 PipelineState 写到 data/traces/<run_id>/<stage>.json.
-失败时可以根据 run_id 下钻看每一步发生了什么 — 这是 legibility-first 的物化。
+After each stage finishes, write the full PipelineState to data/traces/<run_id>/<stage>.json.
+On failure you can drill down by run_id to see what happened at every step — this is
+legibility-first made concrete.
 """
 from __future__ import annotations
 

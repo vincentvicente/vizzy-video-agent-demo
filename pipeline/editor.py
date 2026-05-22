@@ -1,5 +1,5 @@
 """
-Editor — ffmpeg 拼接 + ElevenLabs VO + 字幕 overlay.
+Editor — ffmpeg concat + ElevenLabs VO + subtitle overlay.
 
 Pipeline:
   1. Generate VO per scene via ElevenLabs (1 TTS call per scene)
@@ -61,7 +61,8 @@ def _generate_voiceovers(
 ) -> dict[str, Path]:
     """One ElevenLabs TTS call per scene's voiceover, run in parallel. Returns {scene_id: mp3 path}.
 
-    VO 调用是网络 IO bound 且各 scene 独立 — 并行化把 N 个串行往返压成 ~1 个的墙钟时间.
+    VO calls are network-IO bound and independent per scene — parallelizing collapses N
+    serial round trips into roughly 1 round trip of wall-clock time.
     """
     client = ElevenLabs(api_key=os.environ.get("ELEVENLABS_API_KEY"))
     out_dir = _VO_ROOT / run_id
@@ -207,7 +208,7 @@ def run_editor(
     # Step 1: generate VOs
     vos = _generate_voiceovers(storyboard, run_id)
 
-    # Step 2: normalize clips in parallel (独立的 ffmpeg 子进程), 再按 storyboard 顺序组装.
+    # Step 2: normalize clips in parallel (independent ffmpeg subprocesses), then assemble them in storyboard order.
     for s in storyboard.scenes:
         if s.id not in clip_paths:
             raise ValueError(f"Editor missing clip for scene {s.id}")
@@ -243,8 +244,8 @@ def run_editor(
     srt_path = _build_srt(storyboard, run_id) if burn_subtitles else None
 
     # Step 6: final mux + (optional) burn subtitles
-    # ffmpeg subtitles filter 在含空格路径上 parse 会崩 — 用 cwd workaround:
-    # 把 SRT 拷到 work 目录, 改 cwd 跑 ffmpeg, filter 里只写文件名.
+    # The ffmpeg subtitles filter crashes when parsing paths that contain spaces — work around it via cwd:
+    # copy the SRT into the work dir, run ffmpeg with cwd set there, and reference only the filename in the filter.
 
     def _build_base_cmd() -> list[str]:
         base = ["ffmpeg", "-y", "-i", str(concat_video)]
@@ -276,8 +277,8 @@ def run_editor(
                 )
             print(f"[editor] final video written WITH burned subtitles: {final_path}")
         except RuntimeError as e:
-            # Subtitle burn 失败 → 退化成无字幕版本, 不让整个 pipeline 死掉.
-            # VO 还在(从 combined_audio), 视频仍可用于 demo.
+            # Subtitle burn failed → fall back to a version without subtitles instead of killing the whole pipeline.
+            # The VO is still present (from combined_audio), so the video is still usable for the demo.
             print(f"[editor] WARNING: {e}")
             print(f"[editor] retrying without subtitle burn — final video will have VO only")
             cmd = _build_base_cmd() + encode_args + [str(final_path)]
