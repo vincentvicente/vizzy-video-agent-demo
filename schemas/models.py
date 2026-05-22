@@ -120,6 +120,11 @@ class PipelineState(BaseModel):
     brand: Optional[BrandUnderstanding] = None
     storyboard: Optional[Storyboard] = None
     reference_image_uris: list[str] = Field(default_factory=list)
+    # uri → user tag describing what the image is (e.g. "hero product", "mascot").
+    # Fed to storyboard generation so the Strategist can plan scenes around named assets.
+    reference_tags: dict[str, str] = Field(default_factory=dict)
+    # User-edited storyboard generation system prompt (None = use the built-in default).
+    storyboard_prompt: Optional[str] = None
     director_output: Optional[DirectorOutput] = None
     clip_paths: dict[str, str] = Field(default_factory=dict)  # scene_id → mp4 path
     final_video_path: Optional[str] = None

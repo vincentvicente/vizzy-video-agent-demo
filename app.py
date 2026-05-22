@@ -36,7 +36,8 @@ from pipeline import orchestrator
 from pipeline import clip_jobs
 from utils import video_model
 from utils.trace import save_trace
-from utils.runs import list_runs, load_state, delete_run, set_run_label
+from utils.prompts import STRATEGIST_STORYBOARD_SYSTEM
+from utils.runs import list_runs, load_state, delete_run, set_run_label, save_reference_tags
 
 
 def _llm_model() -> str:
@@ -167,9 +168,8 @@ with st.sidebar:
 
         nav_items = [
             ("input",      "🌐 URL Input",        True),
-            ("brand",      "🏷️  Brand",           has_stage("brand")),
+            ("brand",      "🏷️  Brand & Refs",     has_stage("brand")),
             ("storyboard", "📋 Storyboard",       has_stage("storyboard")),
-            ("references", "🖼️  References",      True),
             ("director",   "🎯 Director Prompts", has_stage("director")),
             ("clips",      "🎞️  Clips",           has_stage("clips") or has_stage("director")),
             ("final",      "🎬 Final Video",      has_stage("final")),
@@ -224,7 +224,7 @@ with st.sidebar:
                         st.session_state.state = loaded
                         # Jump to most-advanced stage
                         for v in ("qa", "final", "clips", "director",
-                                  "references", "storyboard", "brand"):
+                                  "storyboard", "brand"):
                             if has_stage(v):
                                 goto(v)
                                 break
@@ -324,6 +324,60 @@ def render_run_meta(items: list[tuple[str, str]]):
     )
     st.markdown(pills, unsafe_allow_html=True)
     st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
+
+
+_REF_TAG_HINT = "hero product · packaging · mascot/character · lifestyle background · ingredient"
+
+
+def render_reference_manager(state: PipelineState, ctx: str = "refs"):
+    """Upload + free-text tag + remove reference images. The images and their tags are fed
+    (multimodally) to storyboard generation, so the Strategist sees and names the assets."""
+    refs = state.reference_image_uris
+    if refs:
+        for i, uri in enumerate(refs):
+            if not os.path.exists(uri):
+                continue
+            ic, tc = st.columns([1, 3])
+            with ic:
+                st.image(uri, use_container_width=True)
+            with tc:
+                new_tag = st.text_input(
+                    f"Tag · {Path(uri).name}",
+                    value=state.reference_tags.get(uri, ""),
+                    key=f"{ctx}_tag_{i}",
+                    placeholder=f"what is this? e.g. {_REF_TAG_HINT}",
+                )
+                if new_tag.strip() != state.reference_tags.get(uri, ""):
+                    state.reference_tags[uri] = new_tag.strip()
+                    save_reference_tags(state.run_id, state.reference_tags)
+                if st.button("🗑️ Remove", key=f"{ctx}_rm_{i}"):
+                    state.reference_image_uris.pop(i)
+                    state.reference_tags.pop(uri, None)
+                    save_reference_tags(state.run_id, state.reference_tags)
+                    state.clip_paths = {}
+                    state.final_video_path = None
+                    log(f"Reference removed: {Path(uri).name}")
+                    st.rerun()
+    else:
+        st.caption("No reference images yet — upload below to ground the storyboard & clips.")
+
+    uploaded = st.file_uploader(
+        "Add reference images", type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True, key=f"{ctx}_uploader",
+    )
+    if uploaded and st.button("Save uploads", key=f"{ctx}_saveup"):
+        run_refs_dir = REFS_DIR / state.run_id
+        run_refs_dir.mkdir(parents=True, exist_ok=True)
+        for f in uploaded:
+            dest = run_refs_dir / f.name
+            with open(dest, "wb") as out:
+                out.write(f.read())
+            if str(dest) not in state.reference_image_uris:
+                state.reference_image_uris.append(str(dest))
+        state.clip_paths = {}
+        state.director_output = None
+        log(f"Added {len(uploaded)} reference(s)")
+        st.rerun()
 
 
 _CLIP_STATUS = {"queued": "⏳ queued", "submitting": "📤 submitting",
@@ -461,41 +515,104 @@ elif view == "brand":
         new_keywords  = st.text_input("Product visual keywords",   value=", ".join(b.product_visual_keywords))
         new_forbidden = st.text_input("Forbidden claims",          value=", ".join(b.forbidden_claims))
 
+    if st.button("💾 Save brand edits"):
+        state.brand = BrandUnderstanding(
+            name=new_name,
+            usp=new_usp,
+            target_audience=new_audience,
+            tone=[t.strip() for t in new_tone.split(",") if t.strip()],
+            palette=[p.strip() for p in new_palette.split(",") if p.strip()],
+            product_visual_keywords=[k.strip() for k in new_keywords.split(",") if k.strip()],
+            forbidden_claims=[c.strip() for c in new_forbidden.split(",") if c.strip()],
+        )
+        log("Brand edited")
+        st.success("Saved")
+        st.rerun()
+
+    # --- Reference images (merged from the old References view) ---
     st.markdown("---")
-    c1, c2, c3 = st.columns([1, 1, 3])
-    with c1:
-        if st.button("💾 Save edits", use_container_width=True):
-            state.brand = BrandUnderstanding(
-                name=new_name,
-                usp=new_usp,
-                target_audience=new_audience,
-                tone=[t.strip() for t in new_tone.split(",") if t.strip()],
-                palette=[p.strip() for p in new_palette.split(",") if p.strip()],
-                product_visual_keywords=[k.strip() for k in new_keywords.split(",") if k.strip()],
-                forbidden_claims=[c.strip() for c in new_forbidden.split(",") if c.strip()],
-            )
-            log("Brand edited")
-            st.success("Saved")
-            st.rerun()
-    with c2:
-        if st.button("🔄 Regen storyboard from this brand", use_container_width=True):
-            with st.spinner("Strategist regenerating storyboard…"):
+    st.markdown("### 🖼️ Reference images")
+    st.caption("Tagged images are shown to the Strategist (multimodally) so the storyboard is "
+               "grounded in your real assets — they also anchor clip generation.")
+    render_reference_manager(state, ctx="brand")
+
+    # --- Editable storyboard generation prompt ---
+    st.markdown("---")
+    with st.expander("📝 Storyboard generation prompt — view & edit how scenes are written",
+                     expanded=False):
+        using_custom = state.storyboard_prompt is not None
+        st.caption("⚙️ Using a CUSTOM prompt." if using_custom else "Using the built-in default prompt.")
+        edited = st.text_area(
+            "System prompt sent to the Strategist",
+            value=state.storyboard_prompt or STRATEGIST_STORYBOARD_SYSTEM,
+            height=320, key="sb_prompt_edit",
+        )
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            if st.button("💾 Save prompt", use_container_width=True):
+                state.storyboard_prompt = (
+                    edited if edited.strip() != STRATEGIST_STORYBOARD_SYSTEM.strip() else None
+                )
+                log("Storyboard prompt " + ("customized" if state.storyboard_prompt else "reset to default"))
+                st.success("Saved — click Regenerate to apply")
+                st.rerun()
+        with pc2:
+            if st.button("↩️ Reset to default", use_container_width=True):
+                state.storyboard_prompt = None
+                log("Storyboard prompt reset to default")
+                st.rerun()
+
+    # --- Regenerate (brand + reference images + tags + prompt → multimodal) ---
+    st.markdown("---")
+    rc1, rc2 = st.columns([2, 2])
+    with rc1:
+        n_refs = len(state.reference_image_uris)
+        regen_label = (f"🔄 Regenerate storyboard (with {n_refs} ref{'s' if n_refs != 1 else ''})"
+                       if n_refs else "🔄 Regenerate storyboard")
+        if st.button(regen_label, type="primary", use_container_width=True):
+            with st.spinner("Strategist regenerating storyboard"
+                            + (" — seeing your references…" if n_refs else "…")):
                 try:
                     from agents.strategist import write_storyboard
+                    tags = [state.reference_tags.get(u, "") for u in state.reference_image_uris]
                     state.storyboard = write_storyboard(
                         state.brand,
-                        reference_count=len(state.reference_image_uris),
+                        reference_count=n_refs,
+                        reference_image_uris=state.reference_image_uris,
+                        reference_tags=tags,
+                        system_prompt=state.storyboard_prompt,
                     )
+                    # Persist to trace (merge so we keep page_snapshot / brand_text)
+                    tpath = TRACE_ROOT / state.run_id / "strategist.json"
+                    existing = {}
+                    if tpath.exists():
+                        try:
+                            with open(tpath) as f:
+                                existing = json.load(f)
+                        except Exception:
+                            existing = {}
+                    existing.update({
+                        "brand": state.brand.model_dump(),
+                        "storyboard": state.storyboard.model_dump(),
+                        "reference_tags": state.reference_tags,
+                        "storyboard_prompt": state.storyboard_prompt,
+                    })
+                    save_trace(state.run_id, "strategist", existing)
                     # Invalidate downstream
                     state.director_output = None
                     state.clip_paths = {}
                     state.final_video_path = None
                     state.qa_report = None
-                    log("Storyboard regenerated; downstream invalidated")
+                    log(f"Storyboard regenerated ({'multimodal, ' if n_refs else ''}downstream invalidated)")
+                    refresh_runs()
                     goto("storyboard")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed: {e}")
+    with rc2:
+        if st.button("Continue to Storyboard →", use_container_width=True):
+            goto("storyboard")
+            st.rerun()
 
 
 # === Storyboard ===
@@ -571,63 +688,8 @@ elif view == "storyboard":
     st.markdown("---")
     c1, c2 = st.columns([1, 5])
     with c1:
-        if st.button("Continue to References →", type="primary",
-                     use_container_width=True):
-            goto("references")
-            st.rerun()
-
-
-# === References ===
-elif view == "references":
-    _section_header("🖼️ Reference Images",
-                    "Upload 1-9 images. The first one anchors Hailuo/Seedance's visual style "
-                    "via image-to-video. A.1 path: pure user upload (no agent selection).")
-
-    if state.reference_image_uris:
-        st.markdown(f"**{len(state.reference_image_uris)} reference(s) loaded**")
-        cols = st.columns(min(len(state.reference_image_uris), 4))
-        for i, uri in enumerate(state.reference_image_uris):
-            with cols[i % 4]:
-                if os.path.exists(uri):
-                    st.image(uri, use_container_width=True)
-                    st.caption(Path(uri).name)
-                    if st.button("🗑️ Remove", key=f"rmref_{i}",
-                                 use_container_width=True):
-                        state.reference_image_uris.pop(i)
-                        state.clip_paths = {}
-                        state.final_video_path = None
-                        log(f"Reference removed: {uri}")
-                        st.rerun()
-
-    st.markdown("---")
-    uploaded = st.file_uploader(
-        "Add reference images",
-        type=["png", "jpg", "jpeg", "webp"],
-        accept_multiple_files=True,
-        key="ref_uploader",
-    )
-    if uploaded:
-        if st.button("Save uploads", use_container_width=False):
-            run_refs_dir = REFS_DIR / state.run_id
-            run_refs_dir.mkdir(parents=True, exist_ok=True)
-            for f in uploaded:
-                dest = run_refs_dir / f.name
-                with open(dest, "wb") as out:
-                    out.write(f.read())
-                if str(dest) not in state.reference_image_uris:
-                    state.reference_image_uris.append(str(dest))
-            state.clip_paths = {}
-            state.director_output = None
-            log(f"Added {len(uploaded)} references")
-            st.rerun()
-
-    st.markdown("---")
-    c1, c2 = st.columns([1, 5])
-    with c1:
-        ready = len(state.reference_image_uris) > 0
-        if st.button("Run Director →", type="primary",
-                     disabled=not ready, use_container_width=True):
-            with st.spinner("Director generating Seedance/Hailuo prompts…"):
+        if st.button("Run Director →", type="primary", use_container_width=True):
+            with st.spinner("Director generating per-scene prompts…"):
                 try:
                     st.session_state.state = orchestrator.stage_director(state)
                     log("Director complete")
@@ -635,6 +697,9 @@ elif view == "references":
                     st.rerun()
                 except Exception as e:
                     st.error(f"Director failed: {e}")
+    with c2:
+        st.caption("Tip: add & tag reference images on the **Brand & Refs** tab, then "
+                   "regenerate the storyboard there for reference-grounded scenes.")
 
 
 # === Director Prompts ===

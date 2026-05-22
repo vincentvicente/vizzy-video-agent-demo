@@ -59,7 +59,17 @@ def stage_strategist(state: PipelineState, reference_count: int = 0) -> Pipeline
         )
     else:
         brand, page = extract_brand_understanding(state.brand_url, extra_constraints=constraints)
-    storyboard = write_storyboard(brand, reference_count=reference_count, extra_constraints=constraints)
+    # Reference images + tags feed the storyboard (multimodal). Empty on the first run;
+    # populated after the user uploads/tags refs on the Brand tab and regenerates.
+    tags = [state.reference_tags.get(u, "") for u in state.reference_image_uris]
+    storyboard = write_storyboard(
+        brand,
+        reference_count=len(state.reference_image_uris),
+        extra_constraints=constraints,
+        reference_image_uris=state.reference_image_uris,
+        reference_tags=tags,
+        system_prompt=state.storyboard_prompt,
+    )
     state.brand = brand
     state.storyboard = storyboard
     save_trace(state.run_id, "strategist", {
@@ -67,6 +77,8 @@ def stage_strategist(state: PipelineState, reference_count: int = 0) -> Pipeline
         "storyboard": storyboard.model_dump(),
         "page_snapshot": page,
         "brand_text": state.brand_text,  # Persist the original text for reuse on retry / reload
+        "reference_tags": state.reference_tags,
+        "storyboard_prompt": state.storyboard_prompt,
         "applied_constraints": constraints or {},
     })
     return state

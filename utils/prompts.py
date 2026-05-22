@@ -35,6 +35,7 @@ CONTEXT:
 - Format: 9:16 vertical, 25-45 seconds total, paid-social (Meta/TikTok)
 - Audience attention model: must hook in first 3 seconds or scroll
 - Visual constraint: the video generation model will NOT render text/logos/captions/UI — those are added later in post. So your scene descriptions must be PURELY visual (no "text appears", no "logo on screen").
+- Reference images: you MAY be shown the user's reference image(s) (with tags naming what each is). When provided, ground your scenes in what they actually look like — keep the product, character, palette, and overall look CONSISTENT with the references across every scene.
 
 SCENE ROLES (you MUST pick from this enum, NO other roles allowed):
 - hook: 3s, attention-grabbing visual that previews the product or evokes the problem
@@ -109,9 +110,25 @@ Output JSON only."""
 
 
 def strategist_storyboard_user_prompt(
-    brand: dict, reference_count: int, extra_constraints: dict | None = None
+    brand: dict, reference_count: int, extra_constraints: dict | None = None,
+    reference_tags: list[str] | None = None,
 ) -> str:
     """Build the user-message payload for storyboard generation."""
+    tags = [t for t in (reference_tags or []) if t and t.strip()]
+    if reference_count and tags:
+        refs_line = (
+            f"You are shown {reference_count} reference image(s) above, tagged:\n"
+            + "\n".join(f"  - {t}" for t in tags)
+            + "\nGround the scenes in these references and keep the tagged assets visually consistent across scenes."
+        )
+    elif reference_count:
+        refs_line = (
+            f"You are shown {reference_count} reference image(s) above. Ground the scenes in their look "
+            "and keep the product/character/palette consistent across scenes."
+        )
+    else:
+        refs_line = "No reference images provided — rely on the brand info. Plan scenes expressible without text/logos."
+
     return f"""Write a paid-social storyboard for this brand.
 
 BRAND:
@@ -123,7 +140,7 @@ BRAND:
 - Product visual keywords: {', '.join(brand['product_visual_keywords'])}
 - MUST avoid claims about: {', '.join(brand['forbidden_claims']) or 'n/a'}
 
-The user has uploaded {reference_count} reference image(s) which will be used by Seedance 2.0 to control the visual style of generated clips. Plan scenes that can be expressed visually without text/logos.
+{refs_line}
 {_format_constraints(extra_constraints)}
 Output the storyboard JSON only."""
 

@@ -9,7 +9,9 @@ raises a ValidationError and the retry router takes over.
 """
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import re
 from typing import Optional
@@ -38,14 +40,38 @@ def _strip_json_fences(text: str) -> str:
     return text.strip()
 
 
-def _claude_json(system: str, user: str, max_tokens: int = 4096) -> dict:
-    """Single LLM call, parse JSON, raise on bad output."""
+def _image_block(path: str) -> Optional[dict]:
+    """Build an Anthropic vision content block from a local image, or None if unreadable."""
+    if not os.path.exists(path):
+        return None
+    mime, _ = mimetypes.guess_type(path)
+    if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
+        mime = "image/png"
+    with open(path, "rb") as f:
+        b64 = base64.standard_b64encode(f.read()).decode("ascii")
+    return {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}}
+
+
+def _claude_json(
+    system: str, user: str, max_tokens: int = 4096,
+    image_paths: Optional[list[str]] = None,
+) -> dict:
+    """Single LLM call, parse JSON, raise on bad output.
+
+    If image_paths is given, the call is multimodal (images first, then the text prompt) —
+    used so the Strategist can SEE the user's reference images when writing the storyboard.
+    """
+    if image_paths:
+        blocks = [b for b in (_image_block(p) for p in image_paths) if b]
+        content: object = blocks + [{"type": "text", "text": user}]
+    else:
+        content = user
     client = Anthropic()
     resp = client.messages.create(
         model=_MODEL,
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": user}],
+        messages=[{"role": "user", "content": content}],
     )
     text = resp.content[0].text
     cleaned = _strip_json_fences(text)
@@ -109,18 +135,30 @@ def extract_brand_from_text(
 def write_storyboard(
     brand: BrandUnderstanding, reference_count: int = 0,
     extra_constraints: Optional[dict] = None,
+    reference_image_uris: Optional[list[str]] = None,
+    reference_tags: Optional[list[str]] = None,
+    system_prompt: Optional[str] = None,
 ) -> Storyboard:
     """
     Stage 2: brand → storyboard (Schema B: LLM picks role sequence + duration).
 
-    reference_count tells the model how many user-uploaded refs are available.
-    extra_constraints: reinforcement instructions injected by retry_router
-    (e.g. compliance VO rewrite); None on the first run.
+    reference_image_uris: when provided, the call is MULTIMODAL — Claude sees the actual
+      reference images and grounds the scenes in them (cross-scene consistency).
+    reference_tags: human labels for each reference (e.g. "hero product"), shown in the prompt.
+    system_prompt: user-edited generation prompt (None = built-in default).
+    extra_constraints: reinforcement instructions injected by retry_router; None on first run.
+    reference_count defaults to len(reference_image_uris) when images are given.
     """
+    uris = reference_image_uris or []
+    if reference_count == 0 and uris:
+        reference_count = len(uris)
     raw_json = _claude_json(
-        system=STRATEGIST_STORYBOARD_SYSTEM,
-        user=strategist_storyboard_user_prompt(brand.model_dump(), reference_count, extra_constraints),
+        system=system_prompt or STRATEGIST_STORYBOARD_SYSTEM,
+        user=strategist_storyboard_user_prompt(
+            brand.model_dump(), reference_count, extra_constraints, reference_tags
+        ),
         max_tokens=3000,
+        image_paths=uris or None,
     )
     sb = Storyboard(**raw_json)
 

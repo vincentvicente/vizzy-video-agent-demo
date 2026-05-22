@@ -157,6 +157,9 @@ def load_state(run_id: str) -> Optional[PipelineState]:
             # text mode: restore the original copy so a reloaded run can still retry from strategist correctly
             if data.get("brand_text"):
                 state.brand_text = data["brand_text"]
+            # restore user-edited storyboard generation prompt (if any)
+            if data.get("storyboard_prompt"):
+                state.storyboard_prompt = data["storyboard_prompt"]
         except Exception as e:
             print(f"[load_state] strategist parse failed: {e}")
 
@@ -208,9 +211,34 @@ def load_state(run_id: str) -> Optional[PipelineState]:
         except Exception as e:
             print(f"[load_state] qa parse failed: {e}")
 
-    # Reference image URIs (look for any uploaded refs dir)
-    refs_dir = Path(__file__).parent.parent / "data" / "refs" / run_id
+    # Reference image URIs + their tags (look for any uploaded refs dir)
+    refs_dir = DATA_ROOT / "refs" / run_id
     if refs_dir.exists():
-        state.reference_image_uris = sorted(str(p) for p in refs_dir.iterdir() if p.is_file())
+        state.reference_image_uris = sorted(
+            str(p) for p in refs_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+        )
+        tags_path = refs_dir / "tags.json"
+        if tags_path.exists():
+            try:
+                with open(tags_path) as f:
+                    by_name = json.load(f)
+                state.reference_tags = {
+                    uri: by_name[Path(uri).name]
+                    for uri in state.reference_image_uris
+                    if by_name.get(Path(uri).name)
+                }
+            except Exception as e:
+                print(f"[load_state] reference tags parse failed: {e}")
 
     return state
+
+
+def save_reference_tags(run_id: str, tags: dict[str, str]) -> None:
+    """Persist reference-image tags to data/refs/<run_id>/tags.json, keyed by filename
+    (stable across reloads). Empty tags are dropped."""
+    refs_dir = DATA_ROOT / "refs" / run_id
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    by_name = {Path(uri).name: tag.strip() for uri, tag in tags.items() if tag and tag.strip()}
+    with open(refs_dir / "tags.json", "w", encoding="utf-8") as f:
+        json.dump(by_name, f, ensure_ascii=False, indent=2)
