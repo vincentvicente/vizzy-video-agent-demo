@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/refs/
+data/clips/
+data/traces/
+data/final/
+data/voiceover/
+.DS_Store

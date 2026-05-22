@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vizzy",
+      "runtimeExecutable": "/Users/vicentezhu/Desktop/Video Agent Flow/Video Agent Flow/.venv/bin/streamlit",
+      "runtimeArgs": ["run", "app.py", "--server.headless", "true", "--server.port", "8501"],
+      "port": 8501
+    }
+  ]
+}
