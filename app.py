@@ -36,7 +36,7 @@ from pipeline import orchestrator
 from pipeline import clip_jobs
 from utils import video_model
 from utils.trace import save_trace
-from utils.runs import list_runs, load_state, delete_run
+from utils.runs import list_runs, load_state, delete_run, set_run_label
 
 
 def _llm_model() -> str:
@@ -71,6 +71,7 @@ def init_session():
         "runs_index": None,             # cached list[dict] from list_runs()
         "last_decision": None,          # most recent retry router decision
         "confirm_delete": None,         # run_id pending delete confirmation
+        "editing_label": None,          # run_id pending rename
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -209,12 +210,12 @@ with st.sidebar:
     else:
         for run in runs[:20]:
             run_id = run["run_id"]
-            label_brand = run.get("brand_name") or "—"
+            display_name = run.get("label") or run.get("brand_name") or "—"
             label_id = run_id[-9:]
             mark = "🎬" if run["has_final"] else "·"
-            btn_label = f"{mark} {label_brand}  {label_id}"
+            btn_label = f"{mark} {display_name}  {label_id}"
 
-            lc, dc = st.columns([5, 1])
+            lc, ec, dc = st.columns([5, 1, 1])
             with lc:
                 if st.button(btn_label, key=f"loadrun_{run_id}",
                              use_container_width=True):
@@ -228,12 +229,45 @@ with st.sidebar:
                                 goto(v)
                                 break
                         st.rerun()
+            with ec:
+                if st.button("✏️", key=f"askrename_{run_id}",
+                             help="Rename this run",
+                             use_container_width=True):
+                    st.session_state.editing_label = run_id
+                    st.session_state.confirm_delete = None
+                    st.rerun()
             with dc:
                 if st.button("🗑", key=f"askdel_{run_id}",
                              help="Delete this run and all its files",
                              use_container_width=True):
                     st.session_state.confirm_delete = run_id
+                    st.session_state.editing_label = None
                     st.rerun()
+
+            # Inline rename editor for the run being renamed
+            if st.session_state.editing_label == run_id:
+                new_label = st.text_input(
+                    "New name", value=run.get("label") or run.get("brand_name") or "",
+                    key=f"labelinput_{run_id}", placeholder="e.g. Goli hero cut v2",
+                    label_visibility="collapsed",
+                )
+                rc1, rc2 = st.columns(2)
+                with rc1:
+                    if st.button("💾 Save", key=f"savelabel_{run_id}",
+                                 type="primary", use_container_width=True):
+                        try:
+                            set_run_label(run_id, new_label)
+                            log(f"Renamed run {label_id} → {new_label.strip() or '(cleared)'}")
+                            st.session_state.editing_label = None
+                            refresh_runs()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Rename failed: {e}")
+                with rc2:
+                    if st.button("Cancel", key=f"cancelrename_{run_id}",
+                                 use_container_width=True):
+                        st.session_state.editing_label = None
+                        st.rerun()
 
             # Confirmation: only expand the confirm bar for the run pending deletion
             if st.session_state.confirm_delete == run_id:

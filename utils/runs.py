@@ -34,7 +34,9 @@ def list_runs() -> list[dict]:
         if not d.is_dir():
             continue
         run_id = d.name
-        completed_stages = sorted([p.stem for p in d.glob("*.json") if p.is_file()])
+        completed_stages = sorted(
+            [p.stem for p in d.glob("*.json") if p.is_file() and p.stem != "meta"]
+        )
 
         # Final video may not exist if pipeline halted before editor
         final_path = FINAL_ROOT / f"{run_id}.mp4"
@@ -51,14 +53,53 @@ def list_runs() -> list[dict]:
             except Exception:
                 pass
 
+        # User-set custom label (meta.json), if any — takes display priority over brand name
+        label = None
+        meta_path = d / "meta.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path) as f:
+                    label = (json.load(f).get("label") or "").strip() or None
+            except Exception:
+                pass
+
         runs.append({
             "run_id": run_id,
             "brand_name": brand_name,
+            "label": label,
             "completed_stages": completed_stages,
             "has_final": has_final,
             "final_path": str(final_path) if has_final else None,
         })
     return runs
+
+
+def set_run_label(run_id: str, label: str) -> None:
+    """Set/clear a user-friendly display name for a run (stored in traces/<run_id>/meta.json).
+
+    Does not touch the original stage traces. An empty label clears it.
+    Raises ValueError on an unsafe run_id or a run that doesn't exist.
+    """
+    if (not run_id) or run_id in (".", "..") or any(c in run_id for c in ("/", "\\", "\0")):
+        raise ValueError(f"Refusing: '{run_id}' is not a safe run id")
+    run_dir = TRACE_ROOT / run_id
+    if not run_dir.exists():
+        raise ValueError(f"Run '{run_id}' not found")
+    meta_path = run_dir / "meta.json"
+    meta = {}
+    if meta_path.exists():
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except Exception:
+            meta = {}
+    label = (label or "").strip()
+    if label:
+        meta["label"] = label
+    else:
+        meta.pop("label", None)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
 def delete_run(run_id: str) -> list[str]:
