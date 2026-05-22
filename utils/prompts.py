@@ -209,6 +209,7 @@ QA_SYSTEM = """You are the QA Agent of Vizzy. You review a generated paid-social
 You are shown one or more frames from the final video. Evaluate:
 
 1. spelling: Did any unwanted text/captions slip in (Seedance occasionally ignores 'no text')? Are there obvious spelling errors? (Note: the final video has POST-PRODUCTION text overlays for VO subtitles — DO NOT flag those if they are well-formed.)
+1b. unwanted_content: Did any unwanted LOGO, watermark, competitor brand mark, emblem, icon, or signage get rendered into the frame? (The video model sometimes ignores the negative prompt. A competitor logo or stray watermark is a 'block' severity issue.)
 2. brand_consistency:
    - color: Does the palette match the brand?
    - tone: Does the visual feel match (clinical/playful/etc.)?
@@ -229,10 +230,16 @@ Output ONLY valid JSON, no markdown fences:
   "claim_compliance": {"ok": <bool>, "violations": ["<violation>", ...]},
   "ranking": "A"|"B"|"C"|"D"|"F",
   "faults": [
-    {"fault_type": "<type>", "scene_id": "<id|null>", "reason": "<...>", "severity": "block|warn|info"}
+    {"fault_type": "<one of the allowed values below>", "scene_id": "<id|null>", "reason": "<...>", "severity": "block|warn|info"}
   ],
   "overall_pass": <bool>
 }
+
+fault_type MUST be exactly one of: "spelling", "unwanted_content", "brand_consistency:color",
+"brand_consistency:tone", "claim_compliance", "ranking_low", "other". Use "unwanted_content"
+for any rendered logo/watermark/competitor mark/signage. If a problem you spot (e.g. wrong
+product shown, scene doesn't match the storyboard) doesn't fit the specific categories, use
+"other" and explain it in "reason" — do NOT invent new fault_type values.
 
 Set overall_pass=true ONLY if no 'block' severity faults exist.
 """

@@ -67,7 +67,7 @@ class SceneAPICall(BaseModel):
     duration_s: int
     aspect_ratio: Literal["9:16"] = "9:16"
     prompt: str = Field(description="video gen prompt, no text/logo/captions")
-    negative_prompt: str = "text, logo, captions, subtitles, watermark, UI, words, letters"
+    negative_prompt: str = "text, logo, brand mark, competitor logo, emblem, signage, captions, subtitles, watermark, UI, words, letters"
     reference_image_uris: list[str] = Field(
         default_factory=list,
         description="paths to user-uploaded reference images, max 9 per Seedance Omni"
@@ -85,10 +85,12 @@ class Fault(BaseModel):
     """A single issue found by QA — fed to retry_router."""
     fault_type: Literal[
         "spelling",
+        "unwanted_content",   # model rendered an unwanted logo / watermark / competitor mark / signage
         "brand_consistency:color",
         "brand_consistency:tone",
         "claim_compliance",
         "ranking_low",
+        "other",   # catch-all for QA findings outside the fixed vocabulary (routes to halt)
         "ok",
     ]
     scene_id: Optional[str] = None

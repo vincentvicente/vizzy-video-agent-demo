@@ -27,10 +27,12 @@ from schemas import QAReport, Fault, PipelineState
 # conservative call, backed by the retry budget as a safety net.
 ROUTING_TABLE: dict[str, str] = {
     "spelling": "director",                     # rendered text in frame → Director rewrites prompt to strengthen anti-text
+    "unwanted_content": "director",             # unwanted logo/watermark/competitor mark in frame → Director rewrites prompt to strengthen anti-logo
     "brand_consistency:color": "director",      # wrong palette → Director rewrites prompt with palette constraints
     "brand_consistency:tone": "strategist",     # wrong overall tone → Strategist re-derives brand understanding
     "claim_compliance": "strategist",           # non-compliant claim → Strategist fixes USP / rewrites VO
     "ranking_low": "halt",                      # poor overall but no specific cause → halt + report to user
+    "other": "halt",                            # QA finding outside the fixed vocabulary → halt + report to user
     "ok": "none",                               # no retry needed
 }
 
@@ -130,6 +132,14 @@ def decide(qa: QAReport, state: PipelineState) -> RetryDecision:
             "Rewrite EVERY scene's prompt to be 100% wordless visuals. Add explicit phrases like "
             "'no text anywhere', 'no writing', 'no signage', 'no UI elements with words'. "
             "Pure pictorial composition only."
+        )
+    elif chosen.fault_type == "unwanted_content":
+        extra["anti_logo_constraint"] = (
+            "CRITICAL: previous attempt rendered an UNWANTED logo / watermark / competitor brand mark in the frame "
+            "(model ignored the negative prompt). Rewrite EVERY scene's prompt to be free of any logos, watermarks, "
+            "brand marks, emblems, icons, or signage. Add explicit phrases like 'no logos', 'no watermarks', "
+            "'no brand marks', 'no competitor branding', 'no on-screen icons or emblems'. "
+            "Use only original, unbranded product and lifestyle visuals."
         )
     elif chosen.fault_type == "brand_consistency:tone":
         extra["tone_constraint"] = (

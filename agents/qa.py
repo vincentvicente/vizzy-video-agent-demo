@@ -28,6 +28,15 @@ from utils.prompts import QA_SYSTEM, qa_user_prompt
 
 _MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
+# Fixed vocabularies. A creative vision model occasionally emits values outside these
+# (e.g. fault_type "wrong_product"); we coerce to safe fallbacks rather than crash QA.
+_ALLOWED_FAULT_TYPES = {
+    "spelling", "unwanted_content", "brand_consistency:color", "brand_consistency:tone",
+    "claim_compliance", "ranking_low", "other", "ok",
+}
+_ALLOWED_SEVERITIES = {"block", "warn", "info"}
+_ALLOWED_RANKINGS = {"A", "B", "C", "D", "F"}
+
 
 def _strip_json_fences(text: str) -> str:
     text = text.strip()
@@ -117,13 +126,28 @@ def run_qa(
 
     # Normalize faults list — flatten brand_consistency.issues into top-level faults
     faults_list = parsed.get("faults", []) or []
-    for issue in parsed.get("brand_consistency", {}).get("issues", []):
+    for issue in (parsed.get("brand_consistency", {}) or {}).get("issues", []) or []:
         faults_list.append(issue)
+
+    # Defensive coercion: the model may emit fault_type / severity / ranking values outside
+    # our fixed vocabularies. Map them to safe fallbacks (preserving the original label in
+    # the reason) so an off-script QA response can't crash the whole stage.
+    for f in faults_list:
+        if not isinstance(f, dict):
+            continue
+        if f.get("fault_type") not in _ALLOWED_FAULT_TYPES:
+            orig = f.get("fault_type")
+            f["reason"] = f"[{orig}] " + (f.get("reason") or "")
+            f["fault_type"] = "other"
+        if f.get("severity") not in _ALLOWED_SEVERITIES:
+            f["severity"] = "warn"
     parsed["faults"] = faults_list
 
+    if parsed.get("ranking") not in _ALLOWED_RANKINGS:
+        parsed["ranking"] = "C"
+
     # Compute overall_pass server-side (don't trust LLM judgment alone)
-    has_block = any(f.get("severity") == "block" for f in faults_list)
-    parsed["overall_pass"] = not has_block
+    parsed["overall_pass"] = not any(f.get("severity") == "block" for f in faults_list)
 
     return QAReport(**parsed)
 

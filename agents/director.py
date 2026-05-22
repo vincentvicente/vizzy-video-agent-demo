@@ -92,7 +92,7 @@ def run_director(
         call["aspect_ratio"] = "9:16"
         call.setdefault(
             "negative_prompt",
-            "text, logo, captions, subtitles, watermark, UI, words, letters",
+            "text, logo, brand mark, competitor logo, emblem, signage, captions, subtitles, watermark, UI, words, letters",
         )
 
     # Recompute cost ourselves (don't trust LLM math) — use the actual model's pricing logic.

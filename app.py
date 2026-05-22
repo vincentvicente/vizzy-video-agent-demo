@@ -398,7 +398,7 @@ if view == "input" or state is None:
     with url_tab:
         url = st.text_input(
             "Brand URL",
-            value="https://goli.com/pages/goli-acv",
+            value="",
             placeholder="https://yourbrand.com/product",
         )
         if st.button("Analyze brand →", type="primary",
