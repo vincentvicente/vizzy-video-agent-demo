@@ -21,7 +21,8 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-load_dotenv()
+# override=True so .env wins over stale/empty vars exported in the shell
+load_dotenv(override=True)
 
 from schemas import (
     PipelineState,
