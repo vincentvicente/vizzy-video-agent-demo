@@ -25,7 +25,7 @@ URL
  ↓
 [Director]  storyboard → Seedance API params (per scene)
  ↓
- ↓  ✋ γ Checkpoint: only spend money on the next step once the user approves
+ ↓   γ Checkpoint: only spend money on the next step once the user approves
  ↓
 [Clip Generation]  parallel fal.ai → Seedance 2.0
  ↓
@@ -36,7 +36,7 @@ URL
   ├─ pass → final video
   └─ fail → conditional routing table → retry from <stage>
  ↓
-✋ Final accept / regen
+Final accept / regen
 ```
 
 ## Tech Stack
