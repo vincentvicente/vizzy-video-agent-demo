@@ -118,6 +118,14 @@ def custom_css():
             text-align: left !important;
             justify-content: flex-start !important;
         }
+        /* Past-runs icon buttons (rename / delete): center the glyph, not left-aligned */
+        section[data-testid="stSidebar"] [class*="st-key-askrename_"] button,
+        section[data-testid="stSidebar"] [class*="st-key-askdel_"] button {
+            text-align: center !important;
+            justify-content: center !important;
+            padding-left: 0 !important;
+            padding-right: 0 !important;
+        }
         /* Main heading rhythm */
         .main h1 {
             padding-top: 0.2rem;
@@ -212,12 +220,15 @@ with st.sidebar:
             run_id = run["run_id"]
             display_name = run.get("label") or run.get("brand_name") or "—"
             label_id = run_id[-9:]
+            short_name = display_name if len(display_name) <= 17 else display_name[:16] + "…"
+            short_id = run_id[-4:]  # random suffix — short but unique enough to disambiguate
             mark = "🎬" if run["has_final"] else "·"
-            btn_label = f"{mark} {display_name}  {label_id}"
+            btn_label = f"{mark} {short_name} · {short_id}"
 
-            lc, ec, dc = st.columns([5, 1, 1])
+            lc, ec, dc = st.columns([5, 1, 1], vertical_alignment="center")
             with lc:
                 if st.button(btn_label, key=f"loadrun_{run_id}",
+                             help=f"{display_name} · {run_id}",
                              use_container_width=True):
                     loaded = load_state(run_id)
                     if loaded:
@@ -378,6 +389,56 @@ def render_reference_manager(state: PipelineState, ctx: str = "refs"):
         state.director_output = None
         log(f"Added {len(uploaded)} reference(s)")
         st.rerun()
+
+
+_VOICE_PRESETS = {
+    "Rachel — calm narration (F)": "21m00Tcm4TlvDq8ikWAM",
+    "Adam — deep, confident (M)": "pNInz6obpgDQGcFmaJgB",
+    "Antoni — warm (M)": "ErXwobaYiN019PkySvjV",
+    "Bella — soft (F)": "EXAVITQu4vr4xnSDxMaL",
+    "Elli — youthful (F)": "MF3mGyEYCl7XYWbV9V6O",
+    "Josh — young (M)": "TxGEqnHWrfWFTfGW9XjX",
+}
+_VO_MODELS = ["eleven_turbo_v2_5", "eleven_multilingual_v2", "eleven_monolingual_v1"]
+
+
+def render_voiceover_settings(state: PipelineState, ctx: str = "vo"):
+    """Voiceover option controls (voice / model / style) → written to state.voiceover_settings.
+    Applied by the Editor on the next (re-)edit."""
+    vs = state.voiceover_settings or {}
+    with st.expander("🎙️ Voiceover options — voice · model · style", expanded=False):
+        cur_voice = vs.get("voice_id") or os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+        names = ["(custom voice_id)"] + list(_VOICE_PRESETS.keys())
+        cur_name = next((n for n, v in _VOICE_PRESETS.items() if v == cur_voice), "(custom voice_id)")
+        sel = st.selectbox("Voice", names, index=names.index(cur_name), key=f"{ctx}_voice")
+        if sel == "(custom voice_id)":
+            voice_id = st.text_input("Custom voice_id (from your ElevenLabs dashboard)",
+                                     value=cur_voice, key=f"{ctx}_voiceid")
+        else:
+            voice_id = _VOICE_PRESETS[sel]
+        model_default = vs.get("model_id", "eleven_turbo_v2_5")
+        model_id = st.selectbox(
+            "Model", _VO_MODELS,
+            index=_VO_MODELS.index(model_default) if model_default in _VO_MODELS else 0,
+            key=f"{ctx}_model",
+        )
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            stability = st.slider("Stability (low=more emotion, high=steadier)",
+                                  0.0, 1.0, float(vs.get("stability", 0.5)), 0.05, key=f"{ctx}_stab")
+            style = st.slider("Style exaggeration", 0.0, 1.0,
+                              float(vs.get("style", 0.0)), 0.05, key=f"{ctx}_style")
+        with cc2:
+            similarity = st.slider("Similarity boost", 0.0, 1.0,
+                                   float(vs.get("similarity_boost", 0.75)), 0.05, key=f"{ctx}_sim")
+            boost = st.checkbox("Speaker boost", value=bool(vs.get("use_speaker_boost", True)),
+                                key=f"{ctx}_boost")
+        new = {"voice_id": voice_id, "model_id": model_id, "stability": stability,
+               "similarity_boost": similarity, "style": style, "use_speaker_boost": boost}
+        if new != state.voiceover_settings:
+            state.voiceover_settings = new
+        st.caption("Free ElevenLabs tier can't use library voices via API (402) — "
+                   "use a voice from your own account if you hit that. Changes apply on the next (re-)edit.")
 
 
 _CLIP_STATUS = {"queued": "⏳ queued", "submitting": "📤 submitting",
@@ -811,43 +872,86 @@ elif view == "clips":
     # Show live progress here too, so navigating to Clips mid-generation isn't a black box.
     handle_clip_job(state, [s.id for s in scenes])
 
-    cpr = 3
-    for row_start in range(0, len(scenes), cpr):
-        cols = st.columns(cpr)
-        for col_idx, scene in enumerate(scenes[row_start:row_start + cpr]):
-            with cols[col_idx]:
-                st.markdown(f"**{scene.id}**  ·  {scene.role}  ·  {scene.duration_s}s")
-                cp = state.clip_paths.get(scene.id)
-                if cp and os.path.exists(cp):
+    st.caption("Each clip is editable on its own — tweak its prompt or voiceover, regenerate just "
+               "that scene, and 🔊 preview it with sound. (Raw clips are silent; sound is added per scene.)")
+    for scene in scenes:
+        cp = state.clip_paths.get(scene.id)
+        ready = bool(cp and os.path.exists(cp))
+        call = None
+        if state.director_output:
+            call = next((c for c in state.director_output.api_calls if c.scene_id == scene.id), None)
+        preview = (Path(cp).parent / "previews" / f"{scene.id}.mp4") if cp else None
+        mark = "✓" if ready else "⌛"
+        with st.expander(f"**{scene.id}** · {scene.role} · {scene.duration_s}s · {mark}",
+                         expanded=False):
+            vc, ec = st.columns([1, 1])
+            with vc:
+                if preview and preview.exists():
+                    st.video(str(preview))
+                    st.caption("▶ preview WITH voiceover")
+                elif ready:
                     st.video(cp)
+                    st.caption("▶ clip (silent — add voiceover below)")
                 else:
-                    st.warning("Not generated")
-
-                if st.button(f"🔄 Regen {scene.id}",
-                             key=f"regclips_{scene.id}",
-                             use_container_width=True):
-                    call = None
-                    if state.director_output:
-                        call = next(
-                            (c for c in state.director_output.api_calls if c.scene_id == scene.id),
-                            None,
-                        )
-                    if not call:
-                        st.error("No Director prompt — run Director first")
+                    st.warning("Not generated yet")
+                if ready and st.button("🔊 Preview with voiceover", key=f"voprev_{scene.id}",
+                                       use_container_width=True):
+                    if not scene.voiceover.strip():
+                        st.warning("This scene has no voiceover text.")
                     else:
-                        with st.spinner(f"Regen {scene.id}…"):
+                        with st.spinner(f"Generating {scene.id} voiceover preview…"):
                             try:
-                                from pipeline.clip_gen import _generate_one
-                                sid, path = _generate_one(call, state.run_id)
-                                state.clip_paths[sid] = path
-                                state.final_video_path = None
-                                state.qa_report = None
-                                log(f"Clip {sid} regenerated")
+                                from pipeline.editor import build_scene_preview
+                                build_scene_preview(scene.id, scene.voiceover, cp,
+                                                    state.run_id, state.voiceover_settings)
+                                log(f"VO preview built for {scene.id}")
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"Failed: {e}")
+                                st.error(f"VO preview failed: {e}")
+            with ec:
+                new_vo = st.text_area("Voiceover (spoken in this scene)",
+                                      value=scene.voiceover, height=80, key=f"clipvo_{scene.id}")
+                new_prompt = st.text_area("Video prompt",
+                                          value=(call.prompt if call else "(run Director first)"),
+                                          height=110, key=f"clipprompt_{scene.id}",
+                                          disabled=call is None)
+                bc1, bc2 = st.columns(2)
+                with bc1:
+                    if st.button("💾 Save", key=f"clipsave_{scene.id}", use_container_width=True):
+                        vo_changed = new_vo != scene.voiceover
+                        scene.voiceover = new_vo
+                        if call:
+                            call.prompt = new_prompt
+                        # stale VO preview if text changed; final/QA always invalidated
+                        if vo_changed and preview and preview.exists():
+                            preview.unlink()
+                        state.final_video_path = None
+                        state.qa_report = None
+                        log(f"Scene {scene.id} edited")
+                        st.success("Saved")
+                        st.rerun()
+                with bc2:
+                    if st.button("🔄 Regen clip", key=f"clipregen_{scene.id}",
+                                 use_container_width=True):
+                        if not call:
+                            st.error("Run Director first")
+                        else:
+                            with st.spinner(f"Regenerating {scene.id}…"):
+                                try:
+                                    from pipeline.clip_gen import _generate_one
+                                    sid, path = _generate_one(call, state.run_id)
+                                    state.clip_paths[sid] = path
+                                    if preview and preview.exists():
+                                        preview.unlink()  # clip changed → stale preview
+                                    state.final_video_path = None
+                                    state.qa_report = None
+                                    log(f"Clip {sid} regenerated")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed: {e}")
 
     st.markdown("---")
+    render_voiceover_settings(state, ctx="clips_vo")
     c1, c2 = st.columns([1, 5])
     with c1:
         all_ready = all(s.id in state.clip_paths for s in scenes)
@@ -867,27 +971,34 @@ elif view == "clips":
 # === Final ===
 elif view == "final":
     _section_header("🎬 Final Video", f"Run `{state.run_id}`")
+    _vo = state.voiceover_settings or {}
+    _voice_id = _vo.get("voice_id") or os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+    _voice_name = next((n for n, v in _VOICE_PRESETS.items() if v == _voice_id), _voice_id[:10])
     render_run_meta([
         ("video model", state.director_output.api_calls[0].model
             if state.director_output and state.director_output.api_calls else video_model.model_label()),
-        ("VO", os.environ.get("ELEVENLABS_MODEL", "eleven_turbo_v2_5")),
-        ("voice", os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")),
+        ("VO model", _vo.get("model_id", "eleven_turbo_v2_5")),
+        ("voice", _voice_name),
         ("stitch", "ffmpeg · 1080x1920"),
     ])
 
     if state.final_video_path and os.path.exists(state.final_video_path):
-        st.video(state.final_video_path)
-        st.caption(state.final_video_path)
+        # Read bytes so Streamlit keys the player by content — a re-edit/re-voice shows
+        # immediately instead of the browser caching the old same-named file.
         with open(state.final_video_path, "rb") as f:
-            st.download_button(
-                "⬇️ Download mp4",
-                f, file_name=f"vizzy_{state.run_id}.mp4",
-                type="primary",
-            )
+            video_bytes = f.read()
+        st.video(video_bytes)
+        st.caption(state.final_video_path)
+        st.download_button(
+            "⬇️ Download mp4",
+            video_bytes, file_name=f"vizzy_{state.run_id}.mp4",
+            type="primary",
+        )
     else:
         st.warning("No final video yet — run Editor from the Clips tab.")
 
     st.markdown("---")
+    render_voiceover_settings(state, ctx="final_vo")
     c1, c2, c3 = st.columns([1, 1, 4])
     with c1:
         if st.button("Run QA →", type="primary",
@@ -903,8 +1014,10 @@ elif view == "final":
                 except Exception as e:
                     st.error(f"QA failed: {e}")
     with c2:
-        if st.button("🔄 Re-edit", use_container_width=True):
-            with st.spinner("Re-editing…"):
+        if st.button("🔄 Re-edit", use_container_width=True,
+                     help="Re-render the final video — applies edited voiceover text and the "
+                          "voiceover options above. Each scene is stretched to fit its full line."):
+            with st.spinner("Re-editing (regenerating voiceover + stitching)…"):
                 try:
                     st.session_state.state = orchestrator.stage_editor(state)
                     log("Re-edited")

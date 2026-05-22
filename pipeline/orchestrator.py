@@ -139,9 +139,13 @@ def stage_editor(state: PipelineState) -> PipelineState:
         storyboard=state.storyboard,
         run_id=state.run_id,
         burn_subtitles=True,
+        voiceover_settings=state.voiceover_settings,
     )
     state.final_video_path = str(final_path)
-    save_trace(state.run_id, "editor", {"final_video_path": str(final_path)})
+    save_trace(state.run_id, "editor", {
+        "final_video_path": str(final_path),
+        "voiceover_settings": state.voiceover_settings,
+    })
     return state
 
 

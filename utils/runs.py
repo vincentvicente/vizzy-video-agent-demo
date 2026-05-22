@@ -198,6 +198,8 @@ def load_state(run_id: str) -> Optional[PipelineState]:
             with open(ep) as f:
                 data = json.load(f)
             state.final_video_path = data.get("final_video_path")
+            if data.get("voiceover_settings"):
+                state.voiceover_settings = data["voiceover_settings"]
         except Exception as e:
             print(f"[load_state] editor parse failed: {e}")
 

@@ -125,6 +125,9 @@ class PipelineState(BaseModel):
     reference_tags: dict[str, str] = Field(default_factory=dict)
     # User-edited storyboard generation system prompt (None = use the built-in default).
     storyboard_prompt: Optional[str] = None
+    # Voiceover options applied by the Editor: voice_id, model_id, stability, similarity_boost,
+    # style, use_speaker_boost. Empty = ElevenLabs defaults.
+    voiceover_settings: dict = Field(default_factory=dict)
     director_output: Optional[DirectorOutput] = None
     clip_paths: dict[str, str] = Field(default_factory=dict)  # scene_id → mp4 path
     final_video_path: Optional[str] = None
