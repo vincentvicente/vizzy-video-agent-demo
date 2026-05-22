@@ -33,7 +33,20 @@ from schemas import (
     SceneAPICall,
 )
 from pipeline import orchestrator
+from pipeline import clip_jobs
+from utils import video_model
+from utils.trace import save_trace
 from utils.runs import list_runs, load_state, delete_run
+
+
+def _llm_model() -> str:
+    return os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+
+def _ark_region() -> str:
+    """Short region hint from the Ark base URL (e.g. 'cn-beijing')."""
+    host = video_model.ARK_BASE_URL.split("//")[-1].split("/")[0]
+    return host.replace("ark.", "").replace(".volces.com", "").replace(".bytepluses.com", " (byteplus)")
 
 st.set_page_config(
     page_title="Vizzy Studio",
@@ -266,6 +279,77 @@ def _section_header(title: str, sub: str = ""):
         st.caption(sub)
 
 
+def render_run_meta(items: list[tuple[str, str]]):
+    """Compact runtime-metadata strip (pills) so each stage shows what actually ran —
+    model, provider, resolution, cost — instead of looking like a black box."""
+    items = [(k, v) for k, v in items if v]
+    if not items:
+        return
+    pills = " ".join(
+        f"<span class='vizzy-pill'>{k} · <b>{v}</b></span>" for k, v in items
+    )
+    st.markdown(pills, unsafe_allow_html=True)
+    st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
+
+
+_CLIP_STATUS = {"queued": "⏳ queued", "submitting": "📤 submitting",
+                "running": "🎬 generating", "done": "✅ done", "failed": "❌ failed"}
+
+
+def handle_clip_job(state: PipelineState, scene_ids: list[str]) -> None:
+    """Render live per-scene progress for an async clip job (if one exists for this run).
+
+    While running: poll ~every 1.2s via st.rerun(). On completion: commit results to state,
+    persist the clip_gen trace, and (on full success) jump to Clips. If some scenes failed,
+    fall through so the user can regenerate just those. Returns immediately if no job.
+    """
+    job = clip_jobs.snapshot(state.run_id)
+    if not job:
+        return
+
+    total = job["total"]
+    done_n = len(job["results"])
+    scene_fail = [s for s in job["errors"] if s != "_"]
+    st.markdown("### 🎬 Generating clips")
+    st.progress(
+        min(1.0, (done_n + len(scene_fail)) / max(1, total)),
+        text=f"{done_n}/{total} done" + (f" · {len(scene_fail)} failed" if scene_fail else ""),
+    )
+    for sid in scene_ids:
+        if sid in job["results"]:
+            stt = "done"
+        elif sid in job["errors"]:
+            stt = "failed"
+        else:
+            stt = job["status"].get(sid, "queued")
+        st.markdown(f"{_CLIP_STATUS.get(stt, stt)} · **{sid}**")
+        if sid in job["errors"]:
+            st.caption(job["errors"][sid][:200])
+    if "_" in job["errors"]:
+        st.error(f"Generation crashed: {job['errors']['_']}")
+
+    if not job["done"]:
+        time.sleep(1.2)
+        st.rerun()  # raises → stops this run; the poll loop continues on the next
+
+    # Job finished — commit results and persist (this also writes the clip_gen trace that
+    # the button path used to skip, so reloads recover correctly).
+    state.clip_paths.update(job["results"])
+    state.final_video_path = None
+    save_trace(state.run_id, "clip_gen",
+               {"clip_paths": state.clip_paths, "errors": dict(job["errors"])})
+    clip_jobs.clear(state.run_id)
+    refresh_runs()
+    if scene_fail:
+        st.error(f"{len(scene_fail)} scene(s) failed — successful clips kept. "
+                 f"Regenerate the failed ones below.")
+        log(f"Clip job done: {done_n} ok, {len(scene_fail)} failed")
+    else:
+        log(f"Clip job done: {done_n} clips")
+        goto("clips")
+        st.rerun()
+
+
 # === Input ===
 if view == "input" or state is None:
     _section_header("🎬 Vizzy Studio",
@@ -325,6 +409,11 @@ if view == "input" or state is None:
 elif view == "brand":
     _section_header("🏷️ Brand Understanding",
                     "Edit any field; downstream stages (storyboard, director, clips) will be re-runnable.")
+    render_run_meta([
+        ("agent", "Strategist"),
+        ("LLM", _llm_model()),
+        ("input", "text" if state.brand_text else "URL"),
+    ])
 
     b = state.brand
     c1, c2 = st.columns(2)
@@ -381,6 +470,12 @@ elif view == "storyboard":
     total = sum(s.duration_s for s in sb.scenes)
     _section_header("📋 Storyboard",
                     f"{len(sb.scenes)} scenes · {total}s total · Schema B (LLM-picked role sequence)")
+    render_run_meta([
+        ("agent", "Strategist"),
+        ("LLM", _llm_model()),
+        ("scenes", str(len(sb.scenes))),
+        ("total", f"{total}s"),
+    ])
 
     st.info(f"💡 **Why this structure**: {sb.narrative_rationale}")
 
@@ -524,7 +619,16 @@ elif view == "director":
 
     do = state.director_output
     _section_header("🎯 Director — Per-Scene Prompts",
-                    f"Model `{do.api_calls[0].model}` · Est. cost ${do.estimated_cost_usd:.2f}")
+                    "Each scene's storyboard beat translated into a video-gen prompt.")
+    render_run_meta([
+        ("prompt LLM", _llm_model()),
+        ("video provider", video_model.VIDEO_PROVIDER),
+        ("video model", do.api_calls[0].model if do.api_calls else video_model.model_label()),
+        ("est. cost", f"${do.estimated_cost_usd:.2f}"),
+    ])
+
+    # Live progress if an async clip job is running/just-finished for this run.
+    handle_clip_job(state, [c.scene_id for c in do.api_calls])
 
     for call in do.api_calls:
         with st.expander(f"**{call.scene_id}** · {call.duration_s}s "
@@ -580,27 +684,10 @@ elif view == "director":
                          type="primary", use_container_width=True):
                 missing_calls = [c for c in do.api_calls if c.scene_id in missing]
                 sub_output = DirectorOutput(api_calls=missing_calls, estimated_cost_usd=0)
-                with st.spinner(f"Generating {len(missing_calls)} clips in parallel "
-                                f"(~1-3 min)…"):
-                    try:
-                        from pipeline.clip_gen import run_clip_gen, ClipGenError
-                        try:
-                            new_paths = run_clip_gen(sub_output, run_id=state.run_id, on_progress=None)
-                        except ClipGenError as ce:
-                            # Keep the successful ones; let the user regenerate failures individually (saves money: don't rerun successes)
-                            state.clip_paths.update(ce.results)
-                            state.final_video_path = None
-                            log(f"{len(ce.results)} clip(s) ok, {len(ce.errors)} failed")
-                            st.error(f"{len(ce.errors)} clip(s) failed — successful ones kept, "
-                                     f"regen the failed scenes individually below. {ce}")
-                            st.rerun()
-                        state.clip_paths.update(new_paths)
-                        state.final_video_path = None
-                        log(f"{len(new_paths)} clips generated")
-                        goto("clips")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Clip gen failed: {e}")
+                # Launch async — handle_clip_job (top of this view) renders live progress.
+                clip_jobs.start(state.run_id, sub_output)
+                log(f"Started clip job for {len(missing_calls)} scene(s)")
+                st.rerun()
         else:
             if st.button("All clips ready · Continue to Clips →",
                          type="primary", use_container_width=True):
@@ -614,6 +701,16 @@ elif view == "clips":
     n_ready = sum(1 for s in scenes if s.id in state.clip_paths)
     _section_header("🎞️ Generated Clips",
                     f"{n_ready} / {len(scenes)} clips generated")
+    _is_volcano = video_model.VIDEO_PROVIDER == "volcano"
+    render_run_meta([
+        ("provider", video_model.VIDEO_PROVIDER),
+        ("model", video_model.active_model_id()),
+        ("resolution", video_model.VOLCANO_RESOLUTION if _is_volcano else "1080p"),
+        ("region", _ark_region() if _is_volcano else "fal.ai"),
+    ])
+
+    # Show live progress here too, so navigating to Clips mid-generation isn't a black box.
+    handle_clip_job(state, [s.id for s in scenes])
 
     cpr = 3
     for row_start in range(0, len(scenes), cpr):
@@ -671,6 +768,13 @@ elif view == "clips":
 # === Final ===
 elif view == "final":
     _section_header("🎬 Final Video", f"Run `{state.run_id}`")
+    render_run_meta([
+        ("video model", state.director_output.api_calls[0].model
+            if state.director_output and state.director_output.api_calls else video_model.model_label()),
+        ("VO", os.environ.get("ELEVENLABS_MODEL", "eleven_turbo_v2_5")),
+        ("voice", os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")),
+        ("stitch", "ffmpeg · 1080x1920"),
+    ])
 
     if state.final_video_path and os.path.exists(state.final_video_path):
         st.video(state.final_video_path)
@@ -714,6 +818,11 @@ elif view == "final":
 elif view == "qa":
     _section_header("✅ QA Report",
                     "Claude vision frame sampling + spelling + brand consistency + claim compliance checks")
+    render_run_meta([
+        ("agent", "QA"),
+        ("vision model", _llm_model()),
+        ("frames sampled", "4"),
+    ])
 
     qa = state.qa_report
     decision = st.session_state.last_decision or {}

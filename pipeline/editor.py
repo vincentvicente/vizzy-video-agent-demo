@@ -205,8 +205,14 @@ def run_editor(
 
     work = Path(tempfile.mkdtemp(prefix=f"editor_{run_id}_"))
 
-    # Step 1: generate VOs
-    vos = _generate_voiceovers(storyboard, run_id)
+    # Step 1: generate VOs. If TTS fails (e.g. ElevenLabs free tier can't use library
+    # voices → 402), degrade to a silent video instead of failing the whole Editor.
+    # Subtitles still burn (they come from storyboard text, not from TTS).
+    try:
+        vos = _generate_voiceovers(storyboard, run_id)
+    except Exception as e:
+        print(f"[editor] WARNING: voiceover generation failed — producing video WITHOUT VO. {e}")
+        vos = {}
 
     # Step 2: normalize clips in parallel (independent ffmpeg subprocesses), then assemble them in storyboard order.
     for s in storyboard.scenes:

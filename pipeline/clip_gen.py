@@ -187,15 +187,28 @@ def _generate_one_volcano(call: SceneAPICall, run_id: str, on_progress=None) -> 
         on_progress(call.scene_id, "running")
 
     # Poll until terminal state (10 min budget, 5s interval).
+    # The task is already running server-side, so a transient network/poll error must NOT
+    # kill the clip — swallow it and keep polling until the deadline (or too many in a row).
     poll_url = f"{base}/contents/generations/tasks/{task_id}"
     deadline = time.time() + 600
     video_url = None
+    consecutive_errors = 0
     while True:
         if time.time() > deadline:
-            raise RuntimeError(f"Volcano task {task_id} timed out after 10 min")
+            raise RuntimeError(f"Volcano task {task_id} polling timed out after 10 min")
         time.sleep(5)
-        pr = requests.get(poll_url, headers=headers, timeout=30)
-        pr.raise_for_status()
+        try:
+            pr = requests.get(poll_url, headers=headers, timeout=30)
+            pr.raise_for_status()
+        except requests.RequestException as e:
+            consecutive_errors += 1
+            if consecutive_errors >= 20:
+                raise RuntimeError(
+                    f"Volcano task {task_id} poll failed {consecutive_errors}x in a row "
+                    f"(last: {e}). Network to {base} may be unreachable."
+                )
+            continue  # transient — retry on next tick
+        consecutive_errors = 0
         data = pr.json()
         status = data.get("status")
         if status == "succeeded":

@@ -8,7 +8,6 @@ old run from the sidebar to keep editing / regenerating it.
 from __future__ import annotations
 
 import json
-import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -24,10 +23,6 @@ from schemas import (
 DATA_ROOT = Path(__file__).parent.parent / "data"
 TRACE_ROOT = DATA_ROOT / "traces"
 FINAL_ROOT = DATA_ROOT / "final"
-
-# run_id looks like 20260521_163355_p2ul. Validate strictly before deleting to prevent
-# path traversal from wiping out other directories.
-_RUN_ID_RE = re.compile(r"^\d{8}_\d{6}_[a-z0-9]{4}$")
 
 
 def list_runs() -> list[dict]:
@@ -72,17 +67,19 @@ def delete_run(run_id: str) -> list[str]:
     Cascade cleanup: the traces / clips / refs / voiceover directories + final/<run_id>.mp4.
     Returns the list of paths actually deleted (for UI display / logging).
 
-    Raises ValueError if run_id is malformed — guards against accidentally deleting
-    other things under data/.
+    Raises ValueError if run_id is unsafe — guards against path traversal wiping out
+    other things under data/. Any run that shows up in list_runs() can be deleted; we
+    only reject names that aren't a single safe path component.
     """
-    if not _RUN_ID_RE.match(run_id):
-        raise ValueError(f"Refusing to delete: '{run_id}' is not a valid run_id")
+    if (not run_id) or run_id in (".", "..") or any(c in run_id for c in ("/", "\\", "\0")):
+        raise ValueError(f"Refusing to delete: '{run_id}' is not a safe run id")
 
     deleted: list[str] = []
+    data_root = DATA_ROOT.resolve()
     for sub in ("traces", "clips", "refs", "voiceover"):
         d = DATA_ROOT / sub / run_id
-        # resolve + confirm it is still inside DATA_ROOT (belt and suspenders)
-        if d.exists() and DATA_ROOT.resolve() in d.resolve().parents:
+        # confirm the resolved target is a direct child inside DATA_ROOT (belt and suspenders)
+        if d.exists() and data_root in d.resolve().parents:
             shutil.rmtree(d, ignore_errors=True)
             deleted.append(str(d))
 
@@ -132,15 +129,23 @@ def load_state(run_id: str) -> Optional[PipelineState]:
         except Exception as e:
             print(f"[load_state] director parse failed: {e}")
 
-    # Clip Gen (paths to mp4s)
+    # Clip Gen — recover from trace if present, then reconcile with what's actually on disk.
+    # Disk is ground truth: clips may exist even when clip_gen.json was never written
+    # (e.g. generated via the per-scene / "generate missing clips" buttons), so a restart
+    # must not "lose" them.
     cp = d / "clip_gen.json"
     if cp.exists():
         try:
             with open(cp) as f:
-                data = json.load(f)
-            state.clip_paths = data.get("clip_paths", {})
+                state.clip_paths = json.load(f).get("clip_paths", {})
         except Exception as e:
             print(f"[load_state] clip_gen parse failed: {e}")
+    clips_dir = DATA_ROOT / "clips" / run_id
+    if clips_dir.exists():
+        for mp4 in sorted(clips_dir.glob("*.mp4")):
+            state.clip_paths.setdefault(mp4.stem, str(mp4))
+    # Drop any recorded path whose file no longer exists
+    state.clip_paths = {sid: p for sid, p in state.clip_paths.items() if Path(p).exists()}
 
     # Editor (final video)
     ep = d / "editor.json"
