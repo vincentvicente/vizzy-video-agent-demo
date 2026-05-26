@@ -1,9 +1,10 @@
 """
 Single source of truth for the video model + provider.
 
-Two providers are supported, selected by VIDEO_PROVIDER:
+Three providers are supported, selected by VIDEO_PROVIDER:
   - "fal"     → fal.ai endpoints (Seedance v1 / Hailuo), submit-and-block API.
   - "volcano" → Volcengine Ark (Seedance 2.0), async task + polling API.
+  - "atlas"   → Atlas Cloud (Seedance 2.0), POST + poll API.
 
 This module consolidates "which provider / which model id / human-readable label /
 billing logic / cost estimation" in one place; clip_gen and director both pull from
@@ -14,8 +15,8 @@ from __future__ import annotations
 import os
 
 # ---------- Provider selection ----------
-# "fal" (default, keeps existing behavior) or "volcano".
-VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "fal").lower()
+# "fal", "volcano", or "atlas". Overridden at runtime via set_provider() (UI picker).
+VIDEO_PROVIDER = os.environ.get("VIDEO_PROVIDER", "volcano").lower()
 
 # ---------- fal config ----------
 # fal video model endpoint — determines which model runs under the fal provider.
@@ -36,11 +37,43 @@ VOLCANO_RESOLUTION = os.environ.get("VOLCANO_RESOLUTION", "1080p")  # 480p/720p/
 # cross-scene consistency). Set empty to omit (then the image is a literal first frame).
 VOLCANO_IMAGE_ROLE = os.environ.get("VOLCANO_IMAGE_ROLE", "reference_image")
 
+# ---------- Atlas Cloud (Seedance 2.0) config ----------
+ATLAS_API_KEY = os.environ.get("ATLAS_API_KEY")
+ATLAS_BASE_URL = os.environ.get("ATLAS_BASE_URL", "https://api.atlascloud.ai/api/v1/model")
+ATLAS_VIDEO_MODEL = os.environ.get(
+    "ATLAS_VIDEO_MODEL", "bytedance/seedance-2.0/image-to-video"
+)
+
+# ---------- All available provider+model combos for the UI picker ----------
+VIDEO_OPTIONS: list[dict[str, str]] = [
+    {"provider": "volcano", "model": "doubao-seedance-2-0-260128",                  "label": "Seedance 2.0 (Volcano)"},
+    {"provider": "atlas",   "model": "bytedance/seedance-2.0/image-to-video",       "label": "Seedance 2.0 (Atlas)"},
+    {"provider": "atlas",   "model": "bytedance/seedance-2.0/text-to-video",        "label": "Seedance 2.0 text-only (Atlas)"},
+    {"provider": "atlas",   "model": "bytedance/seedance-2.0-fast/image-to-video",  "label": "Seedance 2.0 Fast (Atlas)"},
+    {"provider": "fal",     "model": "fal-ai/bytedance/seedance/v1/pro/image-to-video", "label": "Seedance v1 Pro (fal)"},
+    {"provider": "fal",     "model": "fal-ai/minimax/hailuo-02-fast/image-to-video","label": "Hailuo 02 Fast (fal)"},
+]
+
+
+def set_provider(provider: str, model_id: str | None = None) -> None:
+    """Switch provider (and optionally model) at runtime — called by the UI picker."""
+    global VIDEO_PROVIDER, FAL_VIDEO_MODEL, VOLCANO_VIDEO_MODEL, ATLAS_VIDEO_MODEL
+    VIDEO_PROVIDER = provider.lower()
+    if model_id:
+        if VIDEO_PROVIDER == "fal":
+            FAL_VIDEO_MODEL = model_id
+        elif VIDEO_PROVIDER == "volcano":
+            VOLCANO_VIDEO_MODEL = model_id
+        elif VIDEO_PROVIDER == "atlas":
+            ATLAS_VIDEO_MODEL = model_id
+
 
 def active_model_id() -> str:
     """The model id of the currently selected provider."""
     if VIDEO_PROVIDER == "volcano":
         return VOLCANO_VIDEO_MODEL
+    if VIDEO_PROVIDER == "atlas":
+        return ATLAS_VIDEO_MODEL
     return FAL_VIDEO_MODEL
 
 

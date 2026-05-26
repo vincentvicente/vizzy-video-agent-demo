@@ -26,8 +26,7 @@ from schemas import DirectorOutput, SceneAPICall
 from utils import video_model
 
 
-# Single source of truth: the fal model actually used at runtime (see utils/video_model.py)
-_FAL_MODEL = video_model.FAL_VIDEO_MODEL
+# Single source of truth: the fal model read at call time (see utils/video_model.py)
 _CLIPS_ROOT = Path(__file__).parent.parent / "data" / "clips"
 
 
@@ -74,7 +73,7 @@ def _build_args(call: SceneAPICall) -> dict:
         else:
             image_url = _to_data_uri(first)
 
-    model_lower = _FAL_MODEL.lower()
+    model_lower = video_model.FAL_VIDEO_MODEL.lower()
 
     # ---------- MiniMax Hailuo 02 ----------
     if "hailuo" in model_lower:
@@ -227,16 +226,107 @@ def _generate_one_volcano(call: SceneAPICall, run_id: str, on_progress=None) -> 
     return call.scene_id, str(dest)
 
 
+def _generate_one_atlas(call: SceneAPICall, run_id: str, on_progress=None) -> tuple[str, str]:
+    """Generate one scene clip via Atlas Cloud (Seedance 2.0).
+
+    POST to generateImage → poll /result/{request_id} until done → download video URL.
+    """
+    api_key = video_model.ATLAS_API_KEY
+    if not api_key:
+        raise RuntimeError("ATLAS_API_KEY not set (required for VIDEO_PROVIDER=atlas)")
+    base = video_model.ATLAS_BASE_URL.rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    img = _resolve_image_url(call)
+    duration = max(4, min(15, int(round(call.duration_s))))
+
+    model = video_model.ATLAS_VIDEO_MODEL
+    if img:
+        model = model.replace("/text-to-video", "/image-to-video")
+    elif "/image-to-video" in model:
+        model = model.replace("/image-to-video", "/text-to-video")
+
+    body: dict = {
+        "model": model,
+        "prompt": call.prompt,
+        "duration": duration,
+    }
+    if img:
+        body["image_url"] = img
+    if call.aspect_ratio:
+        body["aspect_ratio"] = call.aspect_ratio
+    if call.seed is not None:
+        body["seed"] = call.seed
+
+    if on_progress:
+        on_progress(call.scene_id, "submitting")
+
+    resp = requests.post(f"{base}/generateImage", headers=headers, json=body, timeout=60)
+    resp.raise_for_status()
+    resp_data = resp.json()
+    request_id = resp_data.get("request_id") or resp_data.get("id")
+    if not request_id:
+        raise RuntimeError(f"Atlas generateImage returned no request_id: {resp.text[:300]}")
+
+    if on_progress:
+        on_progress(call.scene_id, "running")
+
+    # Poll until terminal state (10 min budget, 5s interval).
+    poll_url = f"{base}/result/{request_id}"
+    deadline = time.time() + 600
+    video_url = None
+    consecutive_errors = 0
+    while True:
+        if time.time() > deadline:
+            raise RuntimeError(f"Atlas request {request_id} polling timed out after 10 min")
+        time.sleep(5)
+        try:
+            pr = requests.get(poll_url, headers=headers, timeout=30)
+            pr.raise_for_status()
+        except requests.RequestException as e:
+            consecutive_errors += 1
+            if consecutive_errors >= 20:
+                raise RuntimeError(
+                    f"Atlas request {request_id} poll failed {consecutive_errors}x in a row "
+                    f"(last: {e}). Network to {base} may be unreachable."
+                )
+            continue
+        consecutive_errors = 0
+        data = pr.json()
+        status = data.get("status", "").lower()
+        if status in ("succeeded", "completed", "done"):
+            video_url = (
+                data.get("video_url")
+                or data.get("url")
+                or (data.get("output", {}) or {}).get("video_url")
+                or (data.get("result", {}) or {}).get("video_url")
+            )
+            if not video_url:
+                raise RuntimeError(f"Atlas request {request_id} succeeded but no video_url: {data}")
+            break
+        if status in ("failed", "error", "cancelled"):
+            raise RuntimeError(f"Atlas request {request_id} {status}: {data.get('error') or data}")
+        # pending / processing / queued → keep polling
+
+    dest = _CLIPS_ROOT / run_id / f"{call.scene_id}.mp4"
+    _download(video_url, dest)
+    if on_progress:
+        on_progress(call.scene_id, "done")
+    return call.scene_id, str(dest)
+
+
 def _generate_one(call: SceneAPICall, run_id: str, on_progress=None) -> tuple[str, str]:
     """Generate one scene clip. Returns (scene_id, mp4_path). Dispatches by provider."""
     if video_model.VIDEO_PROVIDER == "volcano":
         return _generate_one_volcano(call, run_id, on_progress)
+    if video_model.VIDEO_PROVIDER == "atlas":
+        return _generate_one_atlas(call, run_id, on_progress)
 
     if on_progress:
         on_progress(call.scene_id, "submitting")
 
     args = _build_args(call)
-    handler = fal_client.submit(_FAL_MODEL, arguments=args)
+    handler = fal_client.submit(video_model.FAL_VIDEO_MODEL, arguments=args)
 
     if on_progress:
         on_progress(call.scene_id, "running")
@@ -296,5 +386,5 @@ def run_clip_gen(
 
 if __name__ == "__main__":
     # Manual smoke test stub
-    print(f"Using fal model: {_FAL_MODEL}")
+    print(f"Using fal model: {video_model.FAL_VIDEO_MODEL}")
     print("Run via run_clip_gen(director_output, run_id) from orchestrator.")

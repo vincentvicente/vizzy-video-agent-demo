@@ -166,6 +166,20 @@ custom_css()
 with st.sidebar:
     st.markdown("### 🎬 Vizzy Studio")
     st.caption("Data-driven paid-social video agent")
+
+    # --- Video model picker ---
+    _opts = video_model.VIDEO_OPTIONS
+    _labels = [o["label"] for o in _opts]
+    _current = next(
+        (i for i, o in enumerate(_opts)
+         if o["provider"] == video_model.VIDEO_PROVIDER and o["model"] == video_model.active_model_id()),
+        0,
+    )
+    _sel = st.selectbox("Video model", _labels, index=_current, key="video_model_picker")
+    _chosen = _opts[_labels.index(_sel)]
+    if _chosen["provider"] != video_model.VIDEO_PROVIDER or _chosen["model"] != video_model.active_model_id():
+        video_model.set_provider(_chosen["provider"], _chosen["model"])
+
     st.markdown("---")
 
     state: PipelineState = st.session_state.state
