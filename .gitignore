@@ -9,3 +9,7 @@ data/traces/
 data/final/
 data/voiceover/
 .DS_Store
+
+# CDK build artifacts / local context
+infra/cdk.out/
+infra/cdk.context.json

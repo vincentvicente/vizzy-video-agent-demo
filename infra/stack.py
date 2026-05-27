@@ -10,6 +10,7 @@ Resources:
 """
 
 GITHUB_REPO = "https://github.com/vincentvicente/vizzy-video-agent-demo"
+GITHUB_BRANCH = "feat/deployment"
 
 import aws_cdk as cdk
 from aws_cdk import (
@@ -42,13 +43,15 @@ mkdir -p /opt/vizzy/data
 # Clone the repo (or pull updates on restart)
 cd /opt/vizzy
 if [ ! -d "app" ]; then
-    git clone https://github.com/__REPO__ app
+    git clone -b __BRANCH__ __REPO__ app
 else
     cd app && git pull && cd ..
 fi
 
 # Write env file from SSM parameters
-aws ssm get-parameter --name /vizzy/env-file --with-decryption --query 'Parameter.Value' --output text --region $(ec2-metadata --availability-zone | sed 's/.$//' | awk '{print $2}') > /opt/vizzy/app/.env
+TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+aws ssm get-parameter --name /vizzy/env-file --with-decryption --query 'Parameter.Value' --output text --region "$REGION" > /opt/vizzy/app/.env
 
 # Build and run
 cd /opt/vizzy/app
@@ -61,7 +64,7 @@ docker run -d \
     -v /opt/vizzy/data:/app/data \
     --env-file .env \
     vizzy
-""".replace("__REPO__", GITHUB_REPO)
+""".replace("__REPO__", GITHUB_REPO).replace("__BRANCH__", GITHUB_BRANCH)
 
 
 class VizzyStack(Stack):
