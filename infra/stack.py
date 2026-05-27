@@ -10,7 +10,7 @@ Resources:
 """
 
 GITHUB_REPO = "https://github.com/vincentvicente/vizzy-video-agent-demo"
-GITHUB_BRANCH = "feat/deployment"
+GITHUB_BRANCH = "main"
 
 import aws_cdk as cdk
 from aws_cdk import (
